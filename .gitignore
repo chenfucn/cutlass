@@ -1,2 +1,4 @@
 # PyCache files
 __pycache__/
+build
+.vscode
