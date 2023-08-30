@@ -150,6 +150,11 @@ template <
   typename ElementB_,
   /// Layout of B matrix (concept: MatrixLayout)
   typename LayoutB_,
+
+  typename ElementQScale_,
+  typename SmemLayoutQScale_,
+  typename QuantBlocking_,
+
   /// Element type of C matrix
   typename ElementC_,
   /// Layout of C matrix (concept: MatrixLayout)
@@ -267,6 +272,25 @@ public:
 
   /// Storage for C tile
   using FragmentC = typename IteratorC::Fragment;
+
+  using ElementQScale = ElementQScale_;
+  using SmemLayoutQScale = SmemLayoutQScale_;
+  using QuantBlocking = QuantBlocking_;
+
+  /// Iterates over the quantization parameters in memory
+  using WarpQScaleShape = MatrixShape<(Shape::kK / QuantBlocking::kRow), (Shape::kN / QuantBlocking::kColumn)>;
+  static_assert(Shape::kK % QuantBlocking::kRow == 0, "K must be multiple of QuantBlocking::kRow");
+  static_assert(Shape::kN % QuantBlocking::kColumn == 0, "N must be multiple of QuantBlocking::kColumn");
+  static_assert(WarpQScaleShape::kCount > 0, "QuantBlocking too big to fit in a warp block!");
+
+  // // TODO This is an expanding iterator, it needs to replicate the quantization parameters
+  // // to all threads in the warp.
+  // using IteratorQScale = MmaTensorOpMetaTileIterator<
+  //     WarpQScaleShape, Operand::kB, ElementQScale, SmemLayoutQScale,
+  //     MatrixShape<ArchMmaOperator::Shape::kK, ArchMmaOperator::Shape::kN>,
+  //     Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
+
+  // using FragmentQScale = typename IteratorQScale::Fragment;
 
   /// Number of mma operations performed
   using MmaIterations = MatrixShape<

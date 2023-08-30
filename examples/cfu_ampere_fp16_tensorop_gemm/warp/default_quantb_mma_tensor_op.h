@@ -56,6 +56,11 @@ template <
     typename ElementB_,
     /// Layout of B matrix (concept: MatrixLayout)
     typename LayoutB_,
+
+    typename ElementQScale_,
+    typename SmemLayoutQScale_,
+    typename QuantBlocking_,
+
     /// Element type of C matrix
     typename ElementC_,
     /// Layout of C matrix (concept: MatrixLayout)
@@ -85,6 +90,11 @@ template <
     typename ElementB,
     /// Layout of B matrix (concept: MatrixLayout)
     typename LayoutB,
+
+    typename ElementQScale,
+    typename SmemLayoutQScale,
+    typename QuantBlocking,
+
     /// Element type of C matrix
     typename ElementC,
     /// Layout of C matrix (concept: MatrixLayout)
@@ -106,7 +116,7 @@ struct DefaultQuantBMmaTensorOp {
 
   // Define the warp-level tensor op
   using Type = cutlass::gemm::warp::QuantBMmaTensorOp<
-      WarpShape_, ElementA, LayoutA, ElementB, LayoutB, ElementC, LayoutC,
+      WarpShape_, ElementA, LayoutA, ElementB, LayoutB, ElementQScale, SmemLayoutQScale, QuantBlocking, ElementC, LayoutC,
       Policy, PartitionsK, AccumulatorsInRowMajor>;
 };
 

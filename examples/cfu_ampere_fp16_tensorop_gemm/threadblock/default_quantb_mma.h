@@ -69,6 +69,11 @@ template <
     typename LayoutB_,
     /// Access granularity of B matrix in units of elements
     int kAlignmentB,
+
+    typename ElementQScale_,
+    typename QuantBlocking_,
+    int kAlignmentQ_,
+
     /// Element type for internal accumulation
     typename ElementAccumulator_,
     /// Layout type for C and D matrix operands
@@ -119,6 +124,11 @@ template <
     typename LayoutB,
     /// Access granularity of B matrix in units of elements
     int kAlignmentB,
+
+    typename ElementQScale,
+    typename QuantBlocking,
+    int kAlignmentQ,
+
     /// Element type for internal accumulation
     typename ElementAccumulator,
     /// Layout type for C and D matrix operand
@@ -147,7 +157,8 @@ template <
     typename PermuteBLayout
     >
 struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
-                  kAlignmentB, ElementAccumulator, LayoutC,
+                  kAlignmentB, ElementQScale, QuantBlocking, kAlignmentQ,
+                  ElementAccumulator, LayoutC,
                   arch::OpClassTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, Stages, Operator, false, SharedMemoryClear,
                   GatherA, GatherB, PermuteALayout, PermuteBLayout> {
@@ -169,7 +180,8 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultQuantBMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, ElementA, LayoutA,
-      ElementB, LayoutB, ElementAccumulator, LayoutC, arch::OpClassTensorOp,
+      ElementB, LayoutB, ElementQScale, QuantBlocking,
+      ElementAccumulator, LayoutC, arch::OpClassTensorOp,
       Stages, Operator, false, CacheOpA, CacheOpB>;
 
   // Define iterators over tiles from the A operand
@@ -188,11 +200,21 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
           cutlass::MatrixShape<ThreadblockShape::kK, ThreadblockShape::kN>,
           ElementB, LayoutB, 0, ThreadMapB, AccessTypeB, GatherB, PermuteBLayout>;
 
+  // Define iterators over tiles from the E operand
+  using ThreadMapQScale = typename MmaCore::IteratorThreadMapQScale;
+  using AccessTypeQScale =
+      cutlass::Array<ElementQScale, ThreadMapQScale::kElementsPerAccess>;
+  using IteratorQScale =
+      cutlass::transform::threadblock::PredicatedTileAccessIterator<
+          typename MmaCore::ThreadblockQScaleShape,
+          ElementQScale, LayoutB, 1, ThreadMapQScale, AccessTypeQScale>;
+
   // Define the threadblock-scoped multistage matrix multiply
   using ThreadblockMma = cutlass::gemm::threadblock::QuantBMmaMultistage<
       typename MmaCore::Shape, IteratorA, typename MmaCore::SmemIteratorA,
       MmaCore::kCacheOpA, IteratorB, typename MmaCore::SmemIteratorB,
-      MmaCore::kCacheOpB, ElementAccumulator, LayoutC,
+      MmaCore::kCacheOpB, IteratorQScale, typename MmaCore::SmemIteratorQScale, MmaCore::kCacheOpQScale,
+      ElementAccumulator, LayoutC,
       typename MmaCore::MmaPolicy, Stages, SharedMemoryClear>;
 };
 

@@ -42,6 +42,9 @@
 #include "cutlass/semaphore.h"
 #include "cutlass/arch/arch.h"
 
+#include "cutlass/util/debug.h"
+#include "cutlass/util/device_dump.h"
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass {
@@ -77,13 +80,15 @@ struct QuantBGemm {
     typename Mma::IteratorA::TensorRef ref_A;
     typename Mma::IteratorB::Params params_B;
     typename Mma::IteratorB::TensorRef ref_B;
+    typename Mma::IteratorQScale::Params params_QScale;
+    typename Mma::IteratorQScale::TensorRef ref_QScale;
     typename Epilogue::OutputTileIterator::Params params_C;
     typename Epilogue::OutputTileIterator::TensorRef ref_C;
     typename Epilogue::OutputTileIterator::Params params_D;
     typename Epilogue::OutputTileIterator::TensorRef ref_D;
     typename OutputOp::Params output_op;
     int *semaphore;
-    int gemm_k_size;
+    int gemm_k_size;  // how many k vectors are processed by this threadblock
     // For gather+scatter operations
     int const *gather_A_indices;
     int const *gather_B_indices;
@@ -102,6 +107,7 @@ struct QuantBGemm {
       cutlass::gemm::GemmCoord const & grid_tiled_shape,
       typename Mma::IteratorA::TensorRef ref_A,
       typename Mma::IteratorB::TensorRef ref_B,
+      typename Mma::IteratorQScale::TensorRef ref_QScale,
       typename Epilogue::OutputTileIterator::TensorRef ref_C,
       typename Epilogue::OutputTileIterator::TensorRef ref_D,
       typename OutputOp::Params output_op = typename OutputOp::Params(),
@@ -117,6 +123,8 @@ struct QuantBGemm {
       ref_A(ref_A),
       params_B(ref_B.layout()),
       ref_B(ref_B),
+      params_QScale(ref_QScale.layout()),
+      ref_QScale(ref_QScale),
       params_C(ref_C.layout()),
       ref_C(ref_C),
       params_D(ref_D.layout()),
@@ -154,8 +162,11 @@ struct QuantBGemm {
     cutlass::gemm::GemmCoord const & problem_size,
     typename Mma::IteratorA::TensorRef ref_A,
     typename Mma::IteratorB::TensorRef ref_B,
+    typename Mma::IteratorQScale::TensorRef ref_QScale,
     typename Epilogue::OutputTileIterator::TensorRef ref_C,
     typename Epilogue::OutputTileIterator::TensorRef ref_D) {
+
+    // TODO check problem_size K, N must be multiple of QuantBlocking
 
     static int const kAlignmentA = (platform::is_same<typename Mma::IteratorA::Layout,
                                                       layout::ColumnMajorInterleaved<32>>::value)
@@ -184,6 +195,10 @@ struct QuantBGemm {
     }
 
     if (!TensorRef_aligned(ref_B, kAlignmentB)) {
+      return Status::kErrorMisalignedOperand;
+    }
+
+    if (!TensorRef_aligned(ref_QScale, Mma::IteratorQScale::AccessType::kElements)) {
       return Status::kErrorMisalignedOperand;
     }
 
@@ -254,6 +269,34 @@ struct QuantBGemm {
       tb_offset_B,
       params.gather_B_indices);
 
+    int qscale_k = problem_size_k / Mma::QuantBlocking::kRow;
+    int qscale_n = params.problem_size.n() / Mma::QuantBlocking::kColumn;
+    if (qscale_k == 0) {
+      printf("qscale_k is 0! TODO!! FIX THIS CODE\n");
+    }
+    if (qscale_k * Mma::QuantBlocking::kRow != problem_size_k) {
+      printf("qscale_k * Mma::QuantBlocking::kK != problem_size_k! TODO!! FIX THIS CODE\n");
+    }
+    if (qscale_n == 0) {
+      printf("qscale_n is 0! TODO!! FIX THIS CODE\n");
+    }
+    if (qscale_n * Mma::QuantBlocking::kColumn != params.problem_size.n()) {
+      printf("qscale_n * Mma::QuantBlocking::kN != params.problem_size.n()! TODO!! FIX THIS CODE\n");
+    }
+
+    cutlass::MatrixCoord tb_offset_QScale{
+      threadblock_tile_offset.k() * (params.gemm_k_size/Mma::QuantBlocking::kRow),
+      threadblock_tile_offset.n() * (Mma::Shape::kN/Mma::QuantBlocking::kColumn)
+    };
+
+    typename Mma::IteratorQScale iterator_QScale(
+      params.params_QScale,
+      params.ref_QScale.data(),
+      {qscale_k, qscale_n},
+      thread_idx,
+      tb_offset_QScale,
+      params.gather_B_indices);
+
     // Broadcast the warp_id computed by lane 0 to ensure dependent code
     // is compiled as warp-uniform.
     int warp_idx = canonical_warp_idx_sync();
@@ -272,7 +315,7 @@ struct QuantBGemm {
 
     if (!kSplitKSerial || gemm_k_iterations > 0) {
       // Compute threadblock-scoped matrix multiply-add
-      mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, accumulators);
+      mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_QScale, accumulators);
     }
 
     //

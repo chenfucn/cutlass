@@ -65,6 +65,8 @@
 #include "cutlass/transform/threadblock/regular_tile_access_iterator_pitch_linear.h"
 //#include "cutlass/gemm/threadblock/mma_multistage.h"
 
+#include "cutlass/util/debug.h"
+#include "cutlass/util/device_dump.h"
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass {
@@ -89,6 +91,10 @@ template <
     typename ElementB,
     /// Layout of operand B
     typename LayoutB,
+
+    typename ElementQScale,
+    typename QuantBlocking,
+
     /// Data type of accumulator
     typename ElementC,
     /// Layout of accumulator
@@ -145,6 +151,10 @@ template <
     typename ElementA_,
     /// Data type of B operand
     typename ElementB_,
+
+    typename ElementQScale_,
+    typename QuantBlocking_,
+
     /// Data type of accumulator
     typename ElementC_,
     /// Layout of accumulator
@@ -159,6 +169,7 @@ template <
     cutlass::arch::CacheOperation::Kind CacheOpB>
 struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
                       layout::RowMajor, ElementB_, layout::ColumnMajor,
+                      ElementQScale_, QuantBlocking_,
                       ElementC_, LayoutC_, arch::OpClassTensorOp, Stages,
                       Operator_, false, CacheOpA, CacheOpB> {
   using Shape = Shape_;
@@ -168,6 +179,10 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   using LayoutA = layout::RowMajor;
   using ElementB = ElementB_;
   using LayoutB = layout::ColumnMajor;
+
+  using ElementQScale = ElementQScale_;
+  using QuantBlocking = QuantBlocking_;
+
   using ElementC = ElementC_;
   using LayoutC = LayoutC_;
   static int const kStages = Stages;
@@ -248,6 +263,35 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
       MatrixShape<Shape::kK, Shape::kN>, ElementB, SmemLayoutB, 1,
       IteratorThreadMapB>;
 
+  /// Quantization parameters
+  static cutlass::arch::CacheOperation::Kind const kCacheOpQScale =
+      cutlass::arch::CacheOperation::Global;
+
+  using SmemLayoutQScale = LayoutB; // quant layout must be the same with B
+
+  using ThreadblockQScaleShape = MatrixShape<Shape::kK / QuantBlocking::kRow, Shape::kN / QuantBlocking::kColumn>;
+  static_assert(Shape::kK % QuantBlocking::kRow == 0, "K must be multiple of QuantBlocking::kRow");
+  static_assert(Shape::kN % QuantBlocking::kColumn == 0, "N must be multiple of QuantBlocking::kColumn");
+  static_assert(ThreadblockQScaleShape::kCount > 0, "QuantBlocking too big to fit in a thread block!");
+
+  /// By default we would like to use 128b load. However, we can't load more than
+  /// a column at a time in a column major layout.
+  static int const kElementsPerAccessQScale =
+      (kAccessSizeInBits / sizeof_bits<ElementQScale>::value) > ThreadblockQScaleShape::kRow
+          ? ThreadblockQScaleShape::kRow
+          : (kAccessSizeInBits / sizeof_bits<ElementQScale>::value);
+
+  /// quant scale is tiny.  Not all threads are needed.
+  static int const kAccessCntQScale = ThreadblockQScaleShape::kCount / kElementsPerAccessQScale;
+  static int const kThreadsQScale = (kAccessCntQScale > kThreads) ? kThreads : kAccessCntQScale;
+
+  using IteratorThreadMapQScale = transform::PitchLinearStripminedThreadMap<
+      layout::PitchLinearShape<ThreadblockQScaleShape::kRow, ThreadblockQScaleShape::kColumn>,
+      kThreadsQScale, kElementsPerAccessQScale>;
+
+  using SmemIteratorQScale = transform::threadblock::RegularTileAccessIterator<
+        ThreadblockQScaleShape, ElementQScale, SmemLayoutQScale, 1, IteratorThreadMapQScale>;
+
   //
   // Warp-level matrix multiply operator
   //
@@ -255,6 +299,7 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   // Define the warp-level tensor op
   using MmaTensorOp = typename cutlass::gemm::warp::DefaultQuantBMmaTensorOp<
       WarpShape, InstructionShape, ElementA, SmemLayoutA, ElementB, SmemLayoutB,
+      ElementQScale, SmemLayoutQScale, QuantBlocking,
       ElementC, LayoutC, Operator, WarpCount::kK>::Type;
 
   /// Policy used to define MmaPipelined

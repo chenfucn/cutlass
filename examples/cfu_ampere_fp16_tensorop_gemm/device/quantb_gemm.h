@@ -175,6 +175,11 @@ template <
     typename ElementB_,
     /// Layout type for B matrix operand
     typename LayoutB_,
+
+    /// Quantization Parameters
+    typename ElementQScale_,
+    typename QuantBlocking_,
+
     /// Element type for C and D matrix operands
     typename ElementC_,
     /// Layout type for C and D matrix operands
@@ -184,7 +189,7 @@ template <
     /// Operator class tag
     typename OperatorClass_ = arch::OpClassSimt,
     /// Tag indicating architecture to tune for
-    typename ArchTag_ = arch::Sm70,
+    typename ArchTag_ = arch::Sm80,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
@@ -260,6 +265,11 @@ class QuantBGemm {
   static ComplexTransform const kTransformA = ComplexTransform::kNone;
   static ComplexTransform const kTransformB = ComplexTransform::kNone;
 
+  // Quantization Parameters
+  using ElementQScale = ElementQScale_;
+  using QuantBlocking = QuantBlocking_;
+  static int const kAlignmentQ = 128 / sizeof_bits<ElementQScale>::value;
+
   /// Define the kernel
   using GemmKernel = typename kernel::DefaultQuantBGemm<
     ElementA,
@@ -268,6 +278,9 @@ class QuantBGemm {
     ElementB,
     LayoutB,
     kAlignmentB,
+    ElementQScale,
+    QuantBlocking,
+    kAlignmentQ,
     ElementC,
     LayoutC,
     ElementAccumulator,
@@ -300,6 +313,10 @@ class QuantBGemm {
     TensorRef<ElementB const, LayoutB> ref_B;
     TensorRef<ElementC const, LayoutC> ref_C;
     TensorRef<ElementC, LayoutC> ref_D;
+
+    // Quantization parameter should be the same layout as B
+    TensorRef<ElementQScale const, LayoutB> ref_Qscale;
+
     typename EpilogueOutputOp::Params epilogue;
     int split_k_slices;
     // For gather+scatter operations
@@ -323,6 +340,7 @@ class QuantBGemm {
       GemmCoord problem_size_,
       TensorRef<ElementA const, LayoutA> ref_A_,
       TensorRef<ElementB const, LayoutB> ref_B_,
+      TensorRef<ElementQScale const, LayoutB> ref_Qscale_,
       TensorRef<ElementC const, LayoutC> ref_C_,
       TensorRef<ElementC, LayoutC> ref_D_,
       typename EpilogueOutputOp::Params epilogue_ = 
@@ -335,6 +353,7 @@ class QuantBGemm {
       problem_size(problem_size_),
       ref_A(ref_A_),
       ref_B(ref_B_),
+      ref_Qscale(ref_Qscale_),
       ref_C(ref_C_),
       ref_D(ref_D_),
       epilogue(epilogue_),
@@ -367,6 +386,7 @@ public:
       args.problem_size,
       args.ref_A.non_const_ref(),
       args.ref_B.non_const_ref(),
+      args.ref_Qscale.non_const_ref(),
       args.ref_C.non_const_ref(),
       args.ref_D
     );
@@ -438,6 +458,7 @@ public:
       grid_shape,
       args.ref_A.non_const_ref(),
       args.ref_B.non_const_ref(),
+      args.ref_Qscale.non_const_ref(),
       args.ref_C.non_const_ref(),
       args.ref_D,
       args.epilogue,
@@ -461,6 +482,7 @@ public:
 
     params_.ref_A.reset(args.ref_A.non_const_ref().data());
     params_.ref_B.reset(args.ref_B.non_const_ref().data());
+    params_.ref_Qscale.reset(args.ref_Qscale.non_const_ref().data());
     params_.ref_C.reset(args.ref_C.non_const_ref().data());
     params_.ref_D.reset(args.ref_D.data());
     params_.output_op = args.epilogue;

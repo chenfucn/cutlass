@@ -101,7 +101,7 @@ struct Options {
   
   Options():
     help(false),
-    problem_size({5120, 4096, 4096}),
+    problem_size({128, 128, 32}),
     batch_count(1),
     reference_check(true),
     iterations(20),
@@ -173,6 +173,10 @@ using ElementInputA = cutlass::half_t;              // <- data type of elements 
 using ElementInputB = cutlass::half_t;              // <- data type of elements in input matrix B
 using ElementOutput = float;                        // <- data type of elements in output matrix D
 
+// Quantization parameter for B matrix
+using ElementQScale = cutlass::half_t;          // <- data type of quantization scale
+using QuantBlocking = cutlass::MatrixShape<1,16>;   // <- quantization blocking, one scale for each (1,16) block
+
 // The code section below describes matrix layout of input and output matrices. Column Major for
 // Matrix A, Row Major for Matrix B and Row Major for Matrix C
 using LayoutInputA = cutlass::layout::RowMajor;
@@ -189,7 +193,7 @@ using SmArch = cutlass::arch::Sm80;
 using ShapeMMAThreadBlock =
     cutlass::gemm::GemmShape<128, 64, 16>;  // <- threadblock tile M = 128, N = 128, K = 16
 // This code section describes tile size a warp will compute
-using ShapeMMAWarp = cutlass::gemm::GemmShape<32, 64, 16>;  // <- warp tile M = 64, N = 64, K = 16
+using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 32, 16>;  // <- warp tile M = 64, N = 64, K = 16
 // This code section describes the size of MMA op
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 8>;  // <- MMA Op tile M = 16, N = 8, K = 8
 
@@ -214,6 +218,8 @@ using Gemm = cutlass::gemm::device::QuantBGemm<ElementInputA,
                                          LayoutInputA,
                                          ElementInputB,
                                          LayoutInputB,
+                                         ElementQScale,
+                                         QuantBlocking,
                                          ElementOutput,
                                          LayoutOutput,
                                          ElementAccumulator,
@@ -269,9 +275,36 @@ int run(Options &options) {
   cutlass::reference::host::TensorFill(
       tensor_ref_d.host_view());  // <- fill matrix D for reference on host with zeros
 
+  // Create quantization matrices
+  cutlass::HostTensor<ElementQScale, LayoutInputB> tensor_scale(
+      problem_size.kn()/cutlass::make_Coord(QuantBlocking::kRow, QuantBlocking::kColumn));  // <- Create matrix Scale with dimensions K x N
+
+  // int fill_val = -1024;
+  // float factor = 1.0f;
+  // for (int col = 0; col < tensor_b.extent().column(); ++col) {
+  //   for (int row = 0; row < tensor_b.extent().row(); ++row) {
+  //     tensor_b.at(cutlass::make_Coord(row, col)) = ElementInputB((float)fill_val * factor);
+  //     fill_val++;
+  //     if (fill_val == 1024) {
+  //       fill_val = -1024;
+  //       factor *= 2.0f;
+  //     }
+  //   }
+  // }
+  // for (int col = 0; col < tensor_scale.extent().column(); ++col) {
+  //   for (int row = 0; row < tensor_scale.extent().row(); ++row) {
+  //     auto scale_cord = cutlass::make_Coord(row, col);
+  //     auto weight_cord = cutlass::make_Coord(row * QuantBlocking::kRow, col * QuantBlocking::kColumn);
+  //     tensor_scale.at(scale_cord) = tensor_b.at(weight_cord);
+  //   }
+  // }
+  // std::cout << "Matrix Weight:\n" << tensor_b.host_view() << "\n";
+  // std::cout << "Matrix Scale:\n" << tensor_scale.host_view() << "\n";
+
   // Copy data from host to GPU
   tensor_a.sync_device();
   tensor_b.sync_device();
+  tensor_scale.sync_device();
   tensor_c.sync_device();
   tensor_d.sync_device();
   tensor_ref_d.sync_device();
@@ -288,6 +321,7 @@ int run(Options &options) {
   typename Gemm::Arguments arguments{problem_size,  // <- problem size of matrix multiplication
                                      tensor_a.device_ref(),  // <- reference to matrix A on device
                                      tensor_b.device_ref(),  // <- reference to matrix B on device
+                                     tensor_scale.device_ref(),  // <- reference to matrix Scale on device
                                      tensor_c.device_ref(),  // <- reference to matrix C on device
                                      tensor_d.device_ref(),  // <- reference to matrix D on device
                                      {alpha, beta},          // <- tuple of alpha and beta
