@@ -206,7 +206,7 @@ class QuantBMmaBase {
   /// Iterator to load a warp-scoped tile of B operand from shared memory
   typename Operator::IteratorB warp_tile_iterator_B_;
 
-//  typename Operator::IteratorQScale warp_tile_iterator_QScale_;
+  typename Operator::IteratorQScale warp_tile_iterator_QScale_;
 
 public:
 
@@ -223,8 +223,8 @@ public:
       int lane_idx
     ):
       warp_tile_iterator_A_(shared_storage.operand_A_ref(), lane_idx),
-      warp_tile_iterator_B_(shared_storage.operand_B_ref(), lane_idx)/*,
-      TODO warp_tile_iterator_QScale_(shared_storage.operand_QScale_ref(), lane_idx)*/ {
+      warp_tile_iterator_B_(shared_storage.operand_B_ref(), lane_idx),
+      warp_tile_iterator_QScale_(shared_storage.operand_QScale_ref(), thread_idx, warp_idx, lane_idx) {
 
   }
 };
@@ -375,9 +375,8 @@ public:
     WarpLoadedFragmentB warp_loaded_frag_B_[2];
     WarpTransformedFragmentB warp_transformed_frag_B_[2];
 
-    // TODO
-    // using WarpLoadedFragmentQScale = typename Operator::FragmentQScale;
-    // WarpLoadedFragmentQScale warp_loaded_frag_QScale_[2];
+    using WarpLoadedFragmentQScale = typename Operator::FragmentQScale;
+    WarpLoadedFragmentQScale warp_loaded_frag_QScale_[2];
   };
 
 
@@ -459,6 +458,8 @@ public:
         {warp_idx_m, Base::kWarpGemmIterations * warp_idx_k});
     this->warp_tile_iterator_B_.add_tile_offset(
         {Base::kWarpGemmIterations * warp_idx_k, warp_idx_n});
+    this->warp_tile_iterator_QScale_.add_tile_offset(
+        {Base::kWarpGemmIterations * warp_idx_k, warp_idx_n});
   }
 
   /// Advance shared memory read-iterators to the next stage
@@ -471,10 +472,11 @@ public:
       // Wrap back around to the 'start' of the circular buffer in shared memory
       this->warp_tile_iterator_A_.add_tile_offset({0, -Base::kStages * Policy::kPartitionsK * Base::kWarpGemmIterations});
       this->warp_tile_iterator_B_.add_tile_offset({-Base::kStages * Policy::kPartitionsK * Base::kWarpGemmIterations, 0});
+      this->warp_tile_iterator_QScale_.add_tile_offset({-Base::kStages * Policy::kPartitionsK * Base::kWarpGemmIterations, 0});
 
-      // if (block_id_ == 1 && warp_id_ == 1 && lane_id_ == 0){
-      //   printf("LINE %d, warp_tile_B add_tile_offset %d\n", __LINE__, -Base::kStages * Policy::kPartitionsK * Base::kWarpGemmIterations);
-      // }
+      if (block_id_ == 1 && warp_id_ == 1 && lane_id_ == 0){
+        printf("LINE %d, warp_tile_B add_tile_offset %d\n", __LINE__, -Base::kStages * Policy::kPartitionsK * Base::kWarpGemmIterations);
+      }
 
       smem_read_stage_idx_ = 0;
     }
@@ -812,13 +814,22 @@ public:
       this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2]);
       ++this->warp_tile_iterator_B_;
 
-      // if (block_id_ == 1 && warp_id_ == 1){
-      //   if (lane_id_ == 0) {
-      //     printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, (warp_mma_k + 1) % Base::kWarpGemmIterations);
-      //   }
-      //   auto& array = pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2];
-      //   printf("Thread: %d, iterator: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
-      // }
+      this->warp_tile_iterator_QScale_.load(pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]);
+      ++this->warp_tile_iterator_QScale_;
+
+      if (block_id_ == 1 && warp_id_ == 1){
+        if (lane_id_ == 0) {
+          printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, (warp_mma_k + 1) % Base::kWarpGemmIterations);
+        }
+        {
+          auto& array = pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2];
+          printf("Thread: %d, B: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
+        }
+        {
+          auto& array = pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2];
+          printf("Thread: %d, Q: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
+        }
+      }
 
 
       // Except for the first warp-tile, all warp-tiles convert their incoming shared memory fragments as necessary
@@ -949,14 +960,22 @@ public:
     this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_[0]);
     ++this->warp_tile_iterator_B_;
 
+    this->warp_tile_iterator_QScale_.load(pipe_state.warp_loaded_frag_QScale_[0]);
+    ++this->warp_tile_iterator_QScale_;
 
-      // if (block_id_ == 1 && warp_id_ == 1){
-      //   if (lane_id_ == 0) {
-      //     printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, 0);
-      //   }
-      //   auto& array = pipe_state.warp_loaded_frag_B_[0];
-      //   printf("Thread: %d, iterator: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
-      // }
+      if (block_id_ == 1 && warp_id_ == 1){
+        if (lane_id_ == 0) {
+          printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, 0);
+        }
+        {
+          auto& array = pipe_state.warp_loaded_frag_B_[0];
+          printf("Thread: %d, B: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
+        }
+        {
+          auto& array = pipe_state.warp_loaded_frag_QScale_[0];
+          printf("Thread: %d, Q: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
+        }
+      }
 
 
     // Transform, if necessary, the first warp-tile's shared memory fragments

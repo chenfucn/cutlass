@@ -258,12 +258,12 @@ int run(Options &options) {
       ElementInputA(4),
       ElementInputA(-4),
       0);  // <- Fill matrix A on host with uniform-distribution random data
-  cutlass::reference::host::TensorFillRandomUniform(
-      tensor_b.host_view(),
-      1,
-      ElementInputB(4),
-      ElementInputB(-4),
-      0);  // <- Fill matrix B on host with uniform-distribution random data
+  // cutlass::reference::host::TensorFillRandomUniform(
+  //     tensor_b.host_view(),
+  //     1,
+  //     ElementInputB(4),
+  //     ElementInputB(-4),
+  //     0);  // <- Fill matrix B on host with uniform-distribution random data
   cutlass::reference::host::TensorFillRandomUniform(
       tensor_c.host_view(),
       1,
@@ -279,27 +279,27 @@ int run(Options &options) {
   cutlass::HostTensor<ElementQScale, LayoutInputB> tensor_scale(
       problem_size.kn()/cutlass::make_Coord(QuantBlocking::kRow, QuantBlocking::kColumn));  // <- Create matrix Scale with dimensions K x N
 
-  // int fill_val = -1024;
-  // float factor = 1.0f;
-  // for (int col = 0; col < tensor_b.extent().column(); ++col) {
-  //   for (int row = 0; row < tensor_b.extent().row(); ++row) {
-  //     tensor_b.at(cutlass::make_Coord(row, col)) = ElementInputB((float)fill_val * factor);
-  //     fill_val++;
-  //     if (fill_val == 1024) {
-  //       fill_val = -1024;
-  //       factor *= 2.0f;
-  //     }
-  //   }
-  // }
-  // for (int col = 0; col < tensor_scale.extent().column(); ++col) {
-  //   for (int row = 0; row < tensor_scale.extent().row(); ++row) {
-  //     auto scale_cord = cutlass::make_Coord(row, col);
-  //     auto weight_cord = cutlass::make_Coord(row * QuantBlocking::kRow, col * QuantBlocking::kColumn);
-  //     tensor_scale.at(scale_cord) = tensor_b.at(weight_cord);
-  //   }
-  // }
-  // std::cout << "Matrix Weight:\n" << tensor_b.host_view() << "\n";
-  // std::cout << "Matrix Scale:\n" << tensor_scale.host_view() << "\n";
+  int fill_val = -1024;
+  float factor = 1.0f;
+  for (int col = 0; col < tensor_b.extent().column(); ++col) {
+    for (int row = 0; row < tensor_b.extent().row(); ++row) {
+      tensor_b.at(cutlass::make_Coord(row, col)) = ElementInputB((float)fill_val * factor);
+      fill_val++;
+      if (fill_val == 1024) {
+        fill_val = -1024;
+        factor *= 2.0f;
+      }
+    }
+  }
+  for (int col = 0; col < tensor_scale.extent().column(); ++col) {
+    for (int row = 0; row < tensor_scale.extent().row(); ++row) {
+      auto scale_cord = cutlass::make_Coord(row, col);
+      auto weight_cord = cutlass::make_Coord(row * QuantBlocking::kRow, col * QuantBlocking::kColumn);
+      tensor_scale.at(scale_cord) = tensor_b.at(weight_cord);
+    }
+  }
+  std::cout << "Matrix Weight:\n" << tensor_b.host_view() << "\n";
+  std::cout << "Matrix Scale:\n" << tensor_scale.host_view() << "\n";
 
   // Copy data from host to GPU
   tensor_a.sync_device();
@@ -368,91 +368,96 @@ int run(Options &options) {
     return -1;
   }
 
-  //
-  // Run profiling loop
-  //
-
-  for (int iter = 0; iter < options.iterations; ++iter) {
     // Launch initialized CUTLASS kernel
     status = gemm_op();
     CUTLASS_CHECK(status);
-  }
+    return 0;
 
-  //
-  // Stop profiling loop
-  //
+  // //
+  // // Run profiling loop
+  // //
 
-  // Record an event when the GEMMs are complete
-  result.error = cudaEventRecord(events[1]);
-  if (result.error != cudaSuccess) {
-    std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(result.error) << std::endl;
-    return -1;
-  }
+  // for (int iter = 0; iter < options.iterations; ++iter) {
+  //   // Launch initialized CUTLASS kernel
+  //   status = gemm_op();
+  //   CUTLASS_CHECK(status);
+  // }
 
-  // Wait for work on the device to complete.
-  result.error = cudaEventSynchronize(events[1]);
-  if (result.error != cudaSuccess) {
-    std::cerr << "cudaEventSynchronize() failed: " << cudaGetErrorString(result.error) << std::endl;
-    return -1;
-  }
+  // //
+  // // Stop profiling loop
+  // //
 
-  // Measure elapsed runtime
-  float runtime_ms = 0;
-  result.error = cudaEventElapsedTime(&runtime_ms, events[0], events[1]);
-  if (result.error != cudaSuccess) {
-    std::cerr << "cudaEventElapsed() failed: " << cudaGetErrorString(result.error) << std::endl;
-    return -1;
-  }
+  // // Record an event when the GEMMs are complete
+  // result.error = cudaEventRecord(events[1]);
+  // if (result.error != cudaSuccess) {
+  //   std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(result.error) << std::endl;
+  //   return -1;
+  // }
 
-  // Compute average runtime and GFLOPs.
-  result.runtime_ms = double(runtime_ms) / double(options.iterations);
-  result.gflops = options.gflops(result.runtime_ms / 1000.0);
+  // // Wait for work on the device to complete.
+  // result.error = cudaEventSynchronize(events[1]);
+  // if (result.error != cudaSuccess) {
+  //   std::cerr << "cudaEventSynchronize() failed: " << cudaGetErrorString(result.error) << std::endl;
+  //   return -1;
+  // }
 
-  // Cleanup
-  for (auto event : events) {
-    (void)cudaEventDestroy(event);
-  }
+  // // Measure elapsed runtime
+  // float runtime_ms = 0;
+  // result.error = cudaEventElapsedTime(&runtime_ms, events[0], events[1]);
+  // if (result.error != cudaSuccess) {
+  //   std::cerr << "cudaEventElapsed() failed: " << cudaGetErrorString(result.error) << std::endl;
+  //   return -1;
+  // }
 
-  // Create instantiation for device reference gemm kernel
-  cutlass::reference::device::Gemm<ElementInputA,
-                                   LayoutInputA,
-                                   ElementInputB,
-                                   LayoutInputB,
-                                   ElementOutput,
-                                   LayoutOutput,
-                                   ElementComputeEpilogue,
-                                   ElementComputeEpilogue>
-      gemm_device;
+  // // Compute average runtime and GFLOPs.
+  // result.runtime_ms = double(runtime_ms) / double(options.iterations);
+  // result.gflops = options.gflops(result.runtime_ms / 1000.0);
 
-  // Launch device reference gemm kernel
-  gemm_device(problem_size,
-              alpha,
-              tensor_a.device_ref(),
-              tensor_b.device_ref(),
-              beta,
-              tensor_c.device_ref(),
-              tensor_ref_d.device_ref());
+  // // Cleanup
+  // for (auto event : events) {
+  //   (void)cudaEventDestroy(event);
+  // }
 
-  // Wait for kernels to finish
-  cudaDeviceSynchronize();
+  // // Create instantiation for device reference gemm kernel
+  // cutlass::reference::device::Gemm<ElementInputA,
+  //                                  LayoutInputA,
+  //                                  ElementInputB,
+  //                                  LayoutInputB,
+  //                                  ElementOutput,
+  //                                  LayoutOutput,
+  //                                  ElementComputeEpilogue,
+  //                                  ElementComputeEpilogue>
+  //     gemm_device;
 
-  // Copy output data from CUTLASS and reference kernel to host for comparison
-  tensor_d.sync_host();
-  tensor_ref_d.sync_host();
+  // // Launch device reference gemm kernel
+  // gemm_device(problem_size,
+  //             alpha,
+  //             tensor_a.device_ref(),
+  //             tensor_b.device_ref(),
+  //             beta,
+  //             tensor_c.device_ref(),
+  //             tensor_ref_d.device_ref());
 
-  // Check if output from CUTLASS kernel and reference kernel are equal or not
-  bool passed = cutlass::reference::host::TensorEquals(
-    tensor_d.host_view(),
-    tensor_ref_d.host_view());
+  // // Wait for kernels to finish
+  // cudaDeviceSynchronize();
 
-  if (passed) {
-    std::cout << "Runtime: " << result.runtime_ms << " ms" << std::endl;
-    std::cout << " GFLOPs: " << result.gflops << std::endl;
-  }
+  // // Copy output data from CUTLASS and reference kernel to host for comparison
+  // tensor_d.sync_host();
+  // tensor_ref_d.sync_host();
 
-  std::cout << (passed ? "Passed" : "Failed") << std::endl;
+  // // Check if output from CUTLASS kernel and reference kernel are equal or not
+  // bool passed = cutlass::reference::host::TensorEquals(
+  //   tensor_d.host_view(),
+  //   tensor_ref_d.host_view());
 
-  return (passed ? 0  : -1);
+  // if (passed) {
+  //   std::cout << "Runtime: " << result.runtime_ms << " ms" << std::endl;
+  //   std::cout << " GFLOPs: " << result.gflops << std::endl;
+  // }
+
+  // std::cout << (passed ? "Passed" : "Failed") << std::endl;
+
+  // return (passed ? 0  : -1);
 }
 
 int main(int argc, const char **argv) {

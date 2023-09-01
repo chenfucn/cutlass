@@ -55,6 +55,8 @@
 #include "warp/quantb_mma_tensor_op_tile_iterator.h"
 //#include "cutlass/gemm/warp/mma_tensor_op_tile_iterator_sm80.h"
 
+#include "warp/quantb_meta_mma_tensor_op_tile_iterator.h"
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass {
@@ -283,14 +285,13 @@ public:
   static_assert(Shape::kN % QuantBlocking::kColumn == 0, "N must be multiple of QuantBlocking::kColumn");
   static_assert(WarpQScaleShape::kCount > 0, "QuantBlocking too big to fit in a warp block!");
 
-  // // TODO This is an expanding iterator, it needs to replicate the quantization parameters
-  // // to all threads in the warp.
-  // using IteratorQScale = MmaTensorOpMetaTileIterator<
-  //     WarpQScaleShape, Operand::kB, ElementQScale, SmemLayoutQScale,
-  //     MatrixShape<ArchMmaOperator::Shape::kK, ArchMmaOperator::Shape::kN>,
-  //     Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
+  // TODO This is an expanding iterator, it needs to replicate the quantization parameters
+  // to all threads in the warp.
+  using IteratorQScale = QuantBMetaMmaTensorOpTileIterator<
+    MatrixShape<Shape::kK, Shape::kN>, QuantBlocking, ElementQScale, SmemLayoutQScale,
+    ArchMmaOperator, kThreadCount, kPartitionsK>;
 
-  // using FragmentQScale = typename IteratorQScale::Fragment;
+  using FragmentQScale = typename IteratorQScale::Fragment;
 
   /// Number of mma operations performed
   using MmaIterations = MatrixShape<
