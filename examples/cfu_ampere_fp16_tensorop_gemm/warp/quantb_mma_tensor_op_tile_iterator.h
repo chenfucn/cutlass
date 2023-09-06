@@ -179,7 +179,7 @@ class QuantBMmaTensorOpMultiplicandTileIterator<
 
     /// Shape of one individual LDSM instruction
     static int const LdsmShapeContiguous =
-        InstructionShape::kContiguous / kLdsmOpOuter;
+        InstructionShape::kContiguous / kLdsmOpOuter;  // num mma_tiles in the k dimension
     static int const LdsmShapeStrided =
         ((4 / LdsmShapeContiguous * kLdsmOpInner) > Shape::kStrided)
             ? (Shape::kStrided / kLdsmOpInner)
@@ -191,10 +191,17 @@ class QuantBMmaTensorOpMultiplicandTileIterator<
     using LdsmIterations =
         layout::PitchLinearShape<1, Shape::kStrided / kLdsmOpInner /
                                         LdsmShape::kStrided>;
+        // since this iterator tile size is <InstructionShape::K,WarpShap::N> the first dim
+        // is always 1. The second dim is the number of LDSM instructions to fill WarpShape::N
 
     ///
     static int const kGroupsPerTile = Layout::TileShape::kContiguous /
                                       Layout::kFactor / LdsmShape::kContiguous;
+          // need to divide Layout::TileShape (8 * 4 or 8 * 8) into this many groups, since
+          // we only load a strip of InstructionShape::K in the K dimension.
+          // Actually Layout::TileShape::kContiguous / Layout::kFactor is like ThreadblockShape::K
+          // passed into shared memory layout as Cross, LdsmShape::kContiguous is like InstructionShape::K,
+
   };
 
  private:
@@ -338,9 +345,9 @@ class QuantBMmaTensorOpMultiplicandTileIterator<
         // Matrix multiply 16816|1688.TF32 B
         // Q0 Q1
         // Q2 Q3
-        partition_contiguous_idx = (lane_id % Layout::kFactor);
+        partition_contiguous_idx = (lane_id % Layout::kFactor);  // even on left, odd on right
         access_contiguous_idx =
-            ((quad_pair & 1) ^ (lane_in_quad_pair / Layout::kFactor));
+            ((quad_pair & 1) ^ (lane_in_quad_pair / Layout::kFactor)); // column index
         access_strided_idx =
             (lane_in_quad_pair + (lane_id >> 4 << 3)) / Layout::kFactor;
       } 
@@ -391,6 +398,9 @@ class QuantBMmaTensorOpMultiplicandTileIterator<
       }
     }
 
+    // partition_contiguous_idx -> even on left, odd on right
+    // access_contiguous_idx -> column index within a partition shape
+    // access_strided_idx -> row index
     int access_contiguous =
         partition_contiguous_idx * Layout::PartitionShape::kContiguous +
         access_contiguous_idx;

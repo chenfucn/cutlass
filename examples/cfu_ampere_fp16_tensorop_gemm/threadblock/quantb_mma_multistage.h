@@ -407,6 +407,7 @@ public:
   bool should_load_qscale_;
 
   /// Shared memory pointers for debug dumping
+  using ShapeB = typename Base::SharedStorage::ShapeB;
   using ShapeQScale = typename Base::SharedStorage::ShapeQScale;
   typename IteratorB::Element* smem_b_ptr_;
   typename IteratorQScale::Element* smem_qscale_ptr_;
@@ -826,7 +827,7 @@ public:
           printf("Thread: %d, B: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
         }
         {
-          auto& array = pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2];
+          auto array = this->warp_tile_iterator_QScale_.debug_expand(pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]);
           printf("Thread: %d, Q: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
         }
       }
@@ -972,7 +973,7 @@ public:
           printf("Thread: %d, B: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
         }
         {
-          auto& array = pipe_state.warp_loaded_frag_QScale_[0];
+          auto array = this->warp_tile_iterator_QScale_.debug_expand(pipe_state.warp_loaded_frag_QScale_[0]);
           printf("Thread: %d, Q: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
         }
       }
@@ -993,13 +994,13 @@ public:
     CUTLASS_GEMM_LOOP
     for (; gemm_k_iterations > (-Base::kStages + 1);) {
 
-      // if (block_id_ == 1){
-      //   if (threadIdx.x == 0){
-      //     printf("stage: %d, gemm_k_iterations: %d\n", smem_write_stage_idx_, gemm_k_iterations);
-      //   }
-      //   // cutlass::debug::dump_shmem(smem_b_ptr_, ShapeQScale::kCount);
-      //   cutlass::debug::dump_shmem(smem_qscale_ptr_, ShapeQScale::kCount);
-      // }
+      if (block_id_ == 1){
+        if (threadIdx.x == 0){
+          printf("stage: %d, gemm_k_iterations: %d\n", smem_write_stage_idx_, gemm_k_iterations);
+        }
+        cutlass::debug::dump_shmem(smem_b_ptr_, ShapeB::kCount);
+        cutlass::debug::dump_shmem(smem_qscale_ptr_, ShapeQScale::kCount);
+      }
 
       mac_loop_iter(
         pipe_state,

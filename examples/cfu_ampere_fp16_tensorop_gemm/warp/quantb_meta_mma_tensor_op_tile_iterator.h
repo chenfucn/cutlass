@@ -72,6 +72,7 @@ public:
   using TileShapeB = MatrixShape<ArchMmaOperator::Shape::kK, WarpShapeB::kColumn>;
 
   /// Number of columns (N) this warp needs to iterate over MMA instruction over
+  /// So it is the number of mma fragements (element B) we need to load per warp.
   static int const kMmaIterationsB = WarpShapeB::kColumn / ArchMmaOperator::Shape::kN;
 
   // Base of the tensor core operand layout is a column major 4x8 tile, divided
@@ -91,8 +92,32 @@ public:
       sizeof_bits<typename ArchMmaOperator::ElementB>::value * ArchMmaOperator::FragmentB::kElements / 32;
   static_assert(kBTilesPerMma == 1 || kBTilesPerMma == 2, "Only support 1 or 2 operand B tiles per mma.");
 
-  using Fragment = Array<Element, kNumBsPerMmaTileFragement * kBTilesPerMma * kMmaIterationsB>;
+  // Since meta data is one per block, we need to figure out how many loads we needs.
+  // For each 32b fragment, number of meta data elements to load is number of B elements
+  // in 32b divided by block size on the k dimension.
+  static int const kMmaTileFragementSize = (kNumBsPerMmaTileFragement + BlockingShape::kRow - 1) / BlockingShape::kRow;
 
+  static int const kKTileStride = (kNumBsPerMmaTileFragement * MmaTileShape::kContiguous + BlockingShape::kRow - 1) / BlockingShape::kRow;
+  static int const kTilesPerMma = ((kBTilesPerMma == 2) && 
+                                  (BlockingShape::kRow <= kNumBsPerMmaTileFragement * MmaTileShape::kContiguous)) 
+                                  ? 2 : 1;
+
+  /// Each fragement should cover kMmaIterationsB number of mma tiles on the N dimension.
+  /// Stride on N dimention should be the tile width, shrunk by blocking size on this dimension.
+  static int const kNStride = (MmaTileShape::kStrided + BlockingShape::kColumn - 1) / BlockingShape::kColumn;
+
+  /// Number of B elements sharing a meta data element on N dimension
+  static int const kNRepeats = (BlockingShape::kColumn + MmaTileShape::kStrided - 1) / MmaTileShape::kStrided;
+
+  /// Each fragement should cover kMmaIterationsB number of mma tiles on the N dimension.
+  /// When blocking size on this dimension exceeds the tile width, multiple iterations
+  /// would share the same data.
+  static int const kMmaIterations = (kMmaIterationsB + kNRepeats - 1) / kNRepeats;
+
+  // using Fragment = Array<Element, kNumBsPerMmaTileFragement * kBTilesPerMma * kMmaIterationsB>;
+  using Fragment = Array<Element, kMmaTileFragementSize * kTilesPerMma * kMmaIterations>;
+
+  using AccessType = Array<Element, kMmaTileFragementSize>;
   using Index = typename Layout::Index;
   using LongIndex = typename Layout::LongIndex;
   using StrideIndex = typename Layout::Stride::Index;
@@ -144,27 +169,40 @@ public:
   /// Loads a fragment
   CUTLASS_HOST_DEVICE
   void load(Fragment &frag) {
-    int b_row = lane_position_.row();
-    int b_column = lane_position_.column();
-    int meta_column = b_column / BlockingShape::kColumn;
+    int row = lane_position_.row() / BlockingShape::kRow;
+    int column = lane_position_.column() / BlockingShape::kColumn;
 
+    int load_idx = 0;
+    for (int n_idx = 0; n_idx < kMmaIterations; n_idx++){
+      for (int mma_tile_idx = 0; mma_tile_idx < kTilesPerMma; mma_tile_idx++){
+        AccessType* src_ptr = reinterpret_cast<AccessType*>(pointer_ + layout_({row + mma_tile_idx * kKTileStride, column + n_idx * kNStride}));
+        AccessType* dst_ptr = reinterpret_cast<AccessType*>(frag.data() + load_idx);
+        load_idx += kMmaTileFragementSize;
+        *dst_ptr = *src_ptr;
+      }
+    }
+  }
+
+  CUTLASS_HOST_DEVICE
+  Array<Element, kNumBsPerMmaTileFragement * kBTilesPerMma * kMmaIterationsB> debug_expand(Fragment const &frag){
     // if (warp_idx_ == 1 && thread_idx_ != 0 && lane_idx_ == 0){
     //     printf("b_row: %d, b_column: %d, meta_column: %d\n", b_row, b_column, meta_column);
     // }
-    
-    int load_idx = 0;
-    int mma_tile_k_offset = kNumBsPerMmaTileFragement * 4;
-    for (int i = 0; i < kMmaIterationsB; i++){
-        for (int mma_tile_idx = 0; mma_tile_idx < kBTilesPerMma; mma_tile_idx++){
-            int row = b_row + mma_tile_idx * mma_tile_k_offset;
-            for (int elem_idx = 0; elem_idx < kNumBsPerMmaTileFragement; elem_idx++){
-                frag[load_idx] = pointer_[layout_({(row + elem_idx)/BlockingShape::kRow, meta_column})];
-                load_idx++;
-            }
+    Array<Element, kNumBsPerMmaTileFragement * kBTilesPerMma * kMmaIterationsB> ret;
+    int out_idx = 0;
+    for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
+      int n_idx = n_out / kNRepeats;
+      for (int mma_tile_out_idx = 0; mma_tile_out_idx < kBTilesPerMma; mma_tile_out_idx++){
+        int mma_tile_idx = mma_tile_out_idx / (kBTilesPerMma / kTilesPerMma);
+        for (int elem_out_idx = 0; elem_out_idx < kNumBsPerMmaTileFragement; elem_out_idx++){
+          int elem_idx = elem_out_idx / BlockingShape::kRow;
+          int idx = elem_idx + mma_tile_idx * kMmaTileFragementSize + n_idx * kMmaTileFragementSize * kTilesPerMma;
+          ret[out_idx] = frag[idx];
+          out_idx++;
         }
-        b_column += 8;
-        meta_column = b_column / BlockingShape::kColumn;
+      }
     }
+    return ret;
   }
 
   /// Advances the pointer
