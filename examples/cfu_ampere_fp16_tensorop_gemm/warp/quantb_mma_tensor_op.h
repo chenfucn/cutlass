@@ -256,9 +256,11 @@ public:
       MatrixShape<Shape::kK, Shape::kN>, Operand::kB, ElementB, LayoutB,
       MatrixShape<ArchMmaOperator::Shape::kK, ArchMmaOperator::Shape::kN>,
       Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
-  // warp B shape MatrixShape<16,64>, ,
-  // LayoutB_=cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<16, 16>,
-  // mma instruction op shape MatrixShape<8, 8>,
+  // warp B MatrixShape<32, 32>, 
+  // layout B cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<16, 32>,
+  // instruction op shape cutlass::MatrixShape<16, 8>,
+  // kPartitionsK 1
+  // FragmentB::kElements 16
 
   /// Storage for B tile
   using FragmentB = typename IteratorB::Fragment;

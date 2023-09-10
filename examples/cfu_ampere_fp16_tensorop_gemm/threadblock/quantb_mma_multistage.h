@@ -824,11 +824,11 @@ public:
         }
         {
           auto& array = pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2];
-          printf("Thread: %d, B: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
+          printf("Thread: %d, B: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]), float(array[8]), float(array[9]), float(array[10]), float(array[11]), float(array[12]), float(array[13]), float(array[14]), float(array[15]));
         }
         {
           auto array = this->warp_tile_iterator_QScale_.debug_expand(pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]);
-          printf("Thread: %d, Q: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
+          printf("Thread: %d, Q: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]), float(array[8]), float(array[9]), float(array[10]), float(array[11]), float(array[12]), float(array[13]), float(array[14]), float(array[15]));
         }
       }
 
@@ -970,11 +970,11 @@ public:
         }
         {
           auto& array = pipe_state.warp_loaded_frag_B_[0];
-          printf("Thread: %d, B: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
+          printf("Thread: %d, B: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]), float(array[8]), float(array[9]), float(array[10]), float(array[11]), float(array[12]), float(array[13]), float(array[14]), float(array[15]));
         }
         {
           auto array = this->warp_tile_iterator_QScale_.debug_expand(pipe_state.warp_loaded_frag_QScale_[0]);
-          printf("Thread: %d, Q: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]));
+          printf("Thread: %d, Q: %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, float(array[0]), float(array[1]), float(array[2]), float(array[3]), float(array[4]), float(array[5]), float(array[6]), float(array[7]), float(array[8]), float(array[9]), float(array[10]), float(array[11]), float(array[12]), float(array[13]), float(array[14]), float(array[15]));
         }
       }
 
