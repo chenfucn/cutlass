@@ -174,7 +174,8 @@ using ElementInputB = cutlass::half_t;              // <- data type of elements 
 using ElementOutput = float;                        // <- data type of elements in output matrix D
 
 // Quantization parameter for B matrix
-using ElementQScale = cutlass::half_t;          // <- data type of quantization scale
+using ElementW = uint8_t;                           // <- Weight is int4, using int8 for two of them
+using ElementQScale = cutlass::half_t;              // <- data type of quantization scale
 using QuantBlocking = cutlass::MatrixShape<1,16>;   // <- quantization blocking, one scale for each (1,16) block
 
 // The code section below describes matrix layout of input and output matrices. Column Major for
@@ -279,18 +280,37 @@ int run(Options &options) {
   cutlass::HostTensor<ElementQScale, LayoutInputB> tensor_scale(
       problem_size.kn()/cutlass::make_Coord(QuantBlocking::kRow, QuantBlocking::kColumn));  // <- Create matrix Scale with dimensions K x N
 
-  int fill_val = -1024;
-  float factor = 1.0f;
-  for (int col = 0; col < tensor_b.extent().column(); ++col) {
-    for (int row = 0; row < tensor_b.extent().row(); ++row) {
-      tensor_b.at(cutlass::make_Coord(row, col)) = ElementInputB((float)fill_val * factor);
-      fill_val++;
-      if (fill_val == 1024) {
-        fill_val = -1024;
-        factor *= 2.0f;
+  // Create weight matrix with dimensions K x N.
+  // Actual weight type is int4, we use ElementW as int8 to avoid possible compilation
+  // troubles. Since the layout is column major, we are packing 2 weights in a column
+  // into one int8
+  cutlass::HostTensor<ElementW, LayoutInputB> tensor_weight(
+    cutlass::make_Coord(problem_size.k()/2, problem_size.n()));  // <- Create matrix Weight with dimensions K/2 x N
+
+  // Fill tensor_b and tensor_weight with the same patterned data, so that we can use
+  // print to make sure the layout matches after loaded to registers
+  int loop_val = 0;
+  int offset = 0;
+  for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
+    for (int row_tile = 0; row_tile < tensor_weight.extent().row()/4; ++row_tile) {
+      for (int col = 0; col < 8; ++col) {
+        for (int row = 0; row < 4; ++row) {
+          auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
+          auto val = (loop_val + offset) % 256;
+          tensor_weight.at(weight_cord) = ElementW(val);
+          tensor_b.at({weight_cord[0] * 2, weight_cord[1]}) = ElementInputB(val);
+          tensor_b.at({weight_cord[0] * 2 + 1, weight_cord[1]}) = ElementInputB(val);
+          auto b_cord = cutlass::make_Coord(weight_cord[0] * 2, weight_cord[1]);
+          loop_val++;
+          if (loop_val == 256) {
+            loop_val = 0;
+            offset++;
+          }
+        }
       }
     }
   }
+
   for (int col = 0; col < tensor_scale.extent().column(); ++col) {
     for (int row = 0; row < tensor_scale.extent().row(); ++row) {
       auto scale_cord = cutlass::make_Coord(row, col);
@@ -298,8 +318,63 @@ int run(Options &options) {
       tensor_scale.at(scale_cord) = tensor_b.at(weight_cord);
     }
   }
-  std::cout << "Matrix Weight:\n" << tensor_b.host_view() << "\n";
+  std::cout << "Matrix B:\n" << tensor_b.host_view() << "\n";
+  std::cout << "Matrix Weight:\n" << tensor_weight.host_view() << "\n";
   std::cout << "Matrix Scale:\n" << tensor_scale.host_view() << "\n";
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Prepack weight matrix to facilitate matrix loading, depending on MMA
+  // instruction layout.
+  //
+  // The weight matrix is int4, yet we want to leverage existing fp16/bf16
+  // tile loading and MMA layout code in CUTLASS. So we group 4 int4 into 2
+  // bytes, pretending it's fp16. This grouping must be done in a way to be
+  // easily unpacked into tiles that match the MMA instruction layout.
+  // For MMA instruction <16, 8, 16>, each instruction processes 2 8x8 tiles,
+  // vertically stacked on the K dimension. And MmaTensorOpMultiplicandTileIterator
+  // loads a <InstructionShape::kK, WarpShape::kN> tile. 
+  //
+  // So we stack 2x2 tiles on a 3rd dimeansion, and reshape them in a HWC layout:
+  // T0, T2
+  // T1, T3
+  // ==>
+  // T0[0, 0], T1[0, 0], T2[0, 0], T3[0, 0]
+  // T0[1, 0], T1[1, 0], T2[1, 0], T3[1, 0]
+  // T0[2, 0], T1[2, 0], T2[2, 0], T3[2, 0]
+  // T0[3, 0], T1[3, 0], T2[3, 0], T3[3, 0]
+  // ...
+  // T0[0, 7], T1[0, 7], T2[0, 7], T3[0, 7]
+  // T0[1, 7], T1[1, 7], T2[1, 7], T3[1, 7]
+  // T0[2, 7], T1[2, 7], T2[2, 7], T3[2, 7]
+  // T0[3, 7], T1[3, 7], T2[3, 7], T3[3, 7]
+  //
+  // This pack a 8x16 int8 tile into a 16x8 int8 tile.
+  /////////////////////////////////////////////////////////////////////////////
+  cutlass::HostTensor<ElementW, LayoutInputB> tensor_weight_prepacked(
+    cutlass::make_Coord(problem_size.k(), problem_size.n()/2));
+  auto t0_base = cutlass::make_Coord(0, 0);
+  auto t1_base = cutlass::make_Coord(4, 0);
+  auto t2_base = cutlass::make_Coord(0, 8);
+  auto t3_base = cutlass::make_Coord(4, 8);
+  for (int col_dtile = 0; col_dtile < tensor_weight.extent().column()/16; ++col_dtile) {
+    for (int row_dtile = 0; row_dtile < tensor_weight.extent().row()/8; ++row_dtile) {
+      // Packing from a 8x16 tile to a 16x8 tile
+      auto dtile_base = cutlass::make_Coord(row_dtile * 8, col_dtile * 16);
+      auto packed_tile_base = cutlass::make_Coord(row_dtile * 16, col_dtile * 8);
+      for (int col = 0; col < 8; ++col) {
+        for (int row = 0; row < 4; ++row) {
+          auto cord = cutlass::make_Coord(row, col);
+          auto packed_cord = packed_tile_base + cutlass::make_Coord(row * 4, col); // packed tile is 16x8
+          tensor_weight_prepacked.at(packed_cord) = tensor_weight.at(dtile_base + t0_base + cord);
+          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(1, 0)) = tensor_weight.at(dtile_base + t1_base + cord);
+          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(2, 0)) = tensor_weight.at(dtile_base + t2_base + cord);
+          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(3, 0)) = tensor_weight.at(dtile_base + t3_base + cord);
+        }
+      }
+    }
+  }
+
+  std::cout << "Matrix Weight Prepacked:\n" << tensor_weight_prepacked.host_view() << "\n";
 
   // Copy data from host to GPU
   tensor_a.sync_device();
