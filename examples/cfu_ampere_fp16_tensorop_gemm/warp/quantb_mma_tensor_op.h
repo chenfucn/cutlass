@@ -153,6 +153,8 @@ template <
   /// Layout of B matrix (concept: MatrixLayout)
   typename LayoutB_,
 
+  typename ElementWPack_,
+  typename LayoutWPack_,
   typename ElementQScale_,
   typename SmemLayoutQScale_,
   typename QuantBlocking_,
@@ -187,6 +189,9 @@ public:
 
   /// Layout of multiplicand B
   using LayoutB = LayoutB_;
+
+  using ElementWPack = ElementWPack_;
+  using LayoutWPack = LayoutWPack_;
 
   /// Data type of accumulator matrix C
   using ElementC = ElementC_;
@@ -224,18 +229,6 @@ public:
   /// Number of partitions along K dimension
   static int const kPartitionsK = PartitionsK_;
 
-  // Shape_=ShapeMMAWarp, 
-  // ElementA_=ElementInputA, 
-  // LayoutA_=cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<16, 16>, 
-  // ElementB_=ElementInputB, 
-  // LayoutB_=cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<16, 16>,
-  // ElementC_=ElementAccumulator,
-  // LayoutC_=LayoutOutput,
-  // Policy_=cutlass::gemm::warp::MmaTensorOpPolicy<cutlass::arch::Mma<cutlass::gemm::GemmShape<16, 8, 8>, 32, cutlass::half_t, cutlass::layout::RowMajor, cutlass::half_t, cutlass::layout::ColumnMajor, float, cutlass::layout::RowMajor, cutlass::arch::OpMultiplyAdd>, cutlass::MatrixShape<1, 1>>,
-  // PartitionsK_=1,
-  // AccumulatorsInRowMajor=false,
-  // Enable=bool   
-
 public:
 
   /// Iterates over the A operand in memory
@@ -256,11 +249,11 @@ public:
       MatrixShape<Shape::kK, Shape::kN>, Operand::kB, ElementB, LayoutB,
       MatrixShape<ArchMmaOperator::Shape::kK, ArchMmaOperator::Shape::kN>,
       Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
-  // warp B MatrixShape<32, 32>, 
-  // layout B cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<16, 32>,
+  // warp B MatrixShape<64, 64>, 
+  // layout B cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<16, 64>, 
   // instruction op shape cutlass::MatrixShape<16, 8>,
   // kPartitionsK 1
-  // FragmentB::kElements 16
+  // FragmentB::kElements 32
 
   /// Storage for B tile
   using FragmentB = typename IteratorB::Fragment;
@@ -268,6 +261,12 @@ public:
   /// Storage for transformed B tile
   using TransformedFragmentB =
       Array<typename ArchMmaOperator::ElementB, FragmentB::kElements>;
+
+  using IteratorW = QuantBMmaTensorOpMultiplicandTileIterator<
+      MatrixShape<Shape::kK/2, Shape::kN/2>, Operand::kB, ElementWPack, LayoutWPack,
+      MatrixShape<ArchMmaOperator::Shape::kK/2, ArchMmaOperator::Shape::kN/2>,
+      Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
+  using FragmentW = typename IteratorW::Fragment; // cutlass::Array<cutlass::half_t, 8>
 
   /// Iterates over the C operand in memory
   using IteratorC = MmaTensorOpAccumulatorTileIterator<

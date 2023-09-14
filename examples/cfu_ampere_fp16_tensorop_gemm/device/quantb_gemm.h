@@ -177,6 +177,8 @@ template <
     typename LayoutB_,
 
     /// Quantization Parameters
+    typename ElementWPack_,
+    typename LayoutWPack_,
     typename ElementQScale_,
     typename QuantBlocking_,
 
@@ -266,6 +268,16 @@ class QuantBGemm {
   static ComplexTransform const kTransformB = ComplexTransform::kNone;
 
   // Quantization Parameters
+  using ElementWPack = ElementWPack_;
+  using LayoutWPack = LayoutWPack_;
+  using TensorRefWPack = TensorRef<ElementWPack const, LayoutWPack>;
+  static int const kAlignmentW = kAlignmentB;
+  static_assert(sizeof_bits<ElementWPack>::value == sizeof_bits<ElementB>::value,
+                "ElementWPack must be 16 bits.");
+  static_assert(std::is_same<LayoutWPack, layout::ColumnMajor>::value,
+                "LayoutWPack must be ColumnMajor.");
+  static_assert(InstructionShape::kK == 16,
+                "InstructionShape::kK must be a multiple of 16 (2 tiles), required by 4b weight prepacking layout.");
   using ElementQScale = ElementQScale_;
   using QuantBlocking = QuantBlocking_;
   static int const kAlignmentQ = 128 / sizeof_bits<ElementQScale>::value;
@@ -278,6 +290,9 @@ class QuantBGemm {
     ElementB,
     LayoutB,
     kAlignmentB,
+    ElementWPack,
+    LayoutWPack,
+    kAlignmentW,
     ElementQScale,
     QuantBlocking,
     kAlignmentQ,
@@ -316,6 +331,7 @@ class QuantBGemm {
 
     // Quantization parameter should be the same layout as B
     TensorRef<ElementQScale const, LayoutB> ref_Qscale;
+    TensorRef<ElementWPack const, LayoutWPack> ref_W;
 
     typename EpilogueOutputOp::Params epilogue;
     int split_k_slices;
@@ -340,6 +356,7 @@ class QuantBGemm {
       GemmCoord problem_size_,
       TensorRef<ElementA const, LayoutA> ref_A_,
       TensorRef<ElementB const, LayoutB> ref_B_,
+      TensorRef<ElementWPack const, LayoutWPack> ref_W_,
       TensorRef<ElementQScale const, LayoutB> ref_Qscale_,
       TensorRef<ElementC const, LayoutC> ref_C_,
       TensorRef<ElementC, LayoutC> ref_D_,
@@ -353,6 +370,7 @@ class QuantBGemm {
       problem_size(problem_size_),
       ref_A(ref_A_),
       ref_B(ref_B_),
+      ref_W(ref_W_),
       ref_Qscale(ref_Qscale_),
       ref_C(ref_C_),
       ref_D(ref_D_),
@@ -386,6 +404,7 @@ public:
       args.problem_size,
       args.ref_A.non_const_ref(),
       args.ref_B.non_const_ref(),
+      args.ref_W.non_const_ref(),
       args.ref_Qscale.non_const_ref(),
       args.ref_C.non_const_ref(),
       args.ref_D
@@ -458,6 +477,7 @@ public:
       grid_shape,
       args.ref_A.non_const_ref(),
       args.ref_B.non_const_ref(),
+      args.ref_W.non_const_ref(),
       args.ref_Qscale.non_const_ref(),
       args.ref_C.non_const_ref(),
       args.ref_D,
@@ -482,6 +502,7 @@ public:
 
     params_.ref_A.reset(args.ref_A.non_const_ref().data());
     params_.ref_B.reset(args.ref_B.non_const_ref().data());
+    params_.ref_W.reset(args.ref_W.non_const_ref().data());
     params_.ref_Qscale.reset(args.ref_Qscale.non_const_ref().data());
     params_.ref_C.reset(args.ref_C.non_const_ref().data());
     params_.ref_D.reset(args.ref_D.data());

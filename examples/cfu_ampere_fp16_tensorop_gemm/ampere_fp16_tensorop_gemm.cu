@@ -101,7 +101,7 @@ struct Options {
   
   Options():
     help(false),
-    problem_size({128, 128, 64}),
+    problem_size({32, 128, 128}),
     batch_count(1),
     reference_check(true),
     iterations(20),
@@ -175,6 +175,8 @@ using ElementOutput = float;                        // <- data type of elements 
 
 // Quantization parameter for B matrix
 using ElementW = uint8_t;                           // <- Weight is int4, using int8 for two of them
+using ElementWPack = cutlass::half_t;               // <- Weight is int4, packed into group of 4, pretending to be 16b type to reuse tile iterators
+using LayoutInputWPack = cutlass::layout::ColumnMajor;  // <- layout of packed weight, must be column major
 using ElementQScale = cutlass::half_t;              // <- data type of quantization scale
 using QuantBlocking = cutlass::MatrixShape<1,16>;   // <- quantization blocking, one scale for each (1,16) block
 
@@ -192,11 +194,11 @@ using SmArch = cutlass::arch::Sm80;
 
 // This code section describes the tile size a thread block will compute
 using ShapeMMAThreadBlock =
-    cutlass::gemm::GemmShape<128, 64, 32>;  // <- threadblock tile M = 128, N = 128, K = 16
+    cutlass::gemm::GemmShape<32, 64, 64>;
 // This code section describes tile size a warp will compute
-using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 32, 32>;  // <- warp tile M = 64, N = 64, K = 16
+using ShapeMMAWarp = cutlass::gemm::GemmShape<32, 64, 64>;
 // This code section describes the size of MMA op
-using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;  // <- MMA Op tile M = 16, N = 8, K = 8
+using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;
 
 
 // This code section describes how threadblocks are scheduled on GPU
@@ -219,6 +221,8 @@ using Gemm = cutlass::gemm::device::QuantBGemm<ElementInputA,
                                          LayoutInputA,
                                          ElementInputB,
                                          LayoutInputB,
+                                         ElementWPack,
+                                         LayoutInputWPack,
                                          ElementQScale,
                                          QuantBlocking,
                                          ElementOutput,
@@ -290,7 +294,7 @@ int run(Options &options) {
   // Fill tensor_b and tensor_weight with the same patterned data, so that we can use
   // print to make sure the layout matches after loaded to registers
   int loop_val = 0;
-  int offset = 0;
+  int offset = 7;
   for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
     for (int row_tile = 0; row_tile < tensor_weight.extent().row()/4; ++row_tile) {
       for (int col = 0; col < 8; ++col) {
@@ -298,13 +302,13 @@ int run(Options &options) {
           auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
           auto val = (loop_val + offset) % 256;
           tensor_weight.at(weight_cord) = ElementW(val);
-          tensor_b.at({weight_cord[0] * 2, weight_cord[1]}) = ElementInputB(val);
-          tensor_b.at({weight_cord[0] * 2 + 1, weight_cord[1]}) = ElementInputB(val);
+          tensor_b.at({weight_cord[0] * 2, weight_cord[1]}) = ElementInputB(val & 0x0f);
+          tensor_b.at({weight_cord[0] * 2 + 1, weight_cord[1]}) = ElementInputB(val >> 4);
           auto b_cord = cutlass::make_Coord(weight_cord[0] * 2, weight_cord[1]);
           loop_val++;
           if (loop_val == 256) {
             loop_val = 0;
-            offset++;
+            offset+=3;
           }
         }
       }
@@ -383,6 +387,10 @@ int run(Options &options) {
   tensor_c.sync_device();
   tensor_d.sync_device();
   tensor_ref_d.sync_device();
+  tensor_weight_prepacked.sync_device();
+  cutlass::TensorRef<ElementWPack const, LayoutInputWPack> ref_W(
+    reinterpret_cast<ElementWPack const *>(tensor_weight_prepacked.device_data()),
+    LayoutInputWPack::packed({problem_size.k()/2, problem_size.n()/2}));
 
   // Initialize alpha and beta for dot product computation
   ElementComputeEpilogue alpha = ElementComputeEpilogue(options.alpha);
@@ -396,6 +404,7 @@ int run(Options &options) {
   typename Gemm::Arguments arguments{problem_size,  // <- problem size of matrix multiplication
                                      tensor_a.device_ref(),  // <- reference to matrix A on device
                                      tensor_b.device_ref(),  // <- reference to matrix B on device
+                                     ref_W,                  // <- reference to packed weights on device
                                      tensor_scale.device_ref(),  // <- reference to matrix Scale on device
                                      tensor_c.device_ref(),  // <- reference to matrix C on device
                                      tensor_d.device_ref(),  // <- reference to matrix D on device
@@ -446,7 +455,7 @@ int run(Options &options) {
     // Launch initialized CUTLASS kernel
     status = gemm_op();
     CUTLASS_CHECK(status);
-    return 0;
+//    return 0;
 
   // //
   // // Run profiling loop
@@ -462,19 +471,19 @@ int run(Options &options) {
   // // Stop profiling loop
   // //
 
-  // // Record an event when the GEMMs are complete
-  // result.error = cudaEventRecord(events[1]);
-  // if (result.error != cudaSuccess) {
-  //   std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(result.error) << std::endl;
-  //   return -1;
-  // }
+  // Record an event when the GEMMs are complete
+  result.error = cudaEventRecord(events[1]);
+  if (result.error != cudaSuccess) {
+    std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(result.error) << std::endl;
+    return -1;
+  }
 
-  // // Wait for work on the device to complete.
-  // result.error = cudaEventSynchronize(events[1]);
-  // if (result.error != cudaSuccess) {
-  //   std::cerr << "cudaEventSynchronize() failed: " << cudaGetErrorString(result.error) << std::endl;
-  //   return -1;
-  // }
+  // Wait for work on the device to complete.
+  result.error = cudaEventSynchronize(events[1]);
+  if (result.error != cudaSuccess) {
+    std::cerr << "cudaEventSynchronize() failed: " << cudaGetErrorString(result.error) << std::endl;
+    return -1;
+  }
 
   // // Measure elapsed runtime
   // float runtime_ms = 0;
@@ -488,51 +497,51 @@ int run(Options &options) {
   // result.runtime_ms = double(runtime_ms) / double(options.iterations);
   // result.gflops = options.gflops(result.runtime_ms / 1000.0);
 
-  // // Cleanup
-  // for (auto event : events) {
-  //   (void)cudaEventDestroy(event);
-  // }
+  // Cleanup
+  for (auto event : events) {
+    (void)cudaEventDestroy(event);
+  }
 
-  // // Create instantiation for device reference gemm kernel
-  // cutlass::reference::device::Gemm<ElementInputA,
-  //                                  LayoutInputA,
-  //                                  ElementInputB,
-  //                                  LayoutInputB,
-  //                                  ElementOutput,
-  //                                  LayoutOutput,
-  //                                  ElementComputeEpilogue,
-  //                                  ElementComputeEpilogue>
-  //     gemm_device;
+  // Create instantiation for device reference gemm kernel
+  cutlass::reference::device::Gemm<ElementInputA,
+                                   LayoutInputA,
+                                   ElementInputB,
+                                   LayoutInputB,
+                                   ElementOutput,
+                                   LayoutOutput,
+                                   ElementComputeEpilogue,
+                                   ElementComputeEpilogue>
+      gemm_device;
 
-  // // Launch device reference gemm kernel
-  // gemm_device(problem_size,
-  //             alpha,
-  //             tensor_a.device_ref(),
-  //             tensor_b.device_ref(),
-  //             beta,
-  //             tensor_c.device_ref(),
-  //             tensor_ref_d.device_ref());
+  // Launch device reference gemm kernel
+  gemm_device(problem_size,
+              alpha,
+              tensor_a.device_ref(),
+              tensor_b.device_ref(),
+              beta,
+              tensor_c.device_ref(),
+              tensor_ref_d.device_ref());
 
-  // // Wait for kernels to finish
-  // cudaDeviceSynchronize();
+  // Wait for kernels to finish
+  cudaDeviceSynchronize();
 
-  // // Copy output data from CUTLASS and reference kernel to host for comparison
-  // tensor_d.sync_host();
-  // tensor_ref_d.sync_host();
+  // Copy output data from CUTLASS and reference kernel to host for comparison
+  tensor_d.sync_host();
+  tensor_ref_d.sync_host();
 
-  // // Check if output from CUTLASS kernel and reference kernel are equal or not
-  // bool passed = cutlass::reference::host::TensorEquals(
-  //   tensor_d.host_view(),
-  //   tensor_ref_d.host_view());
+  // Check if output from CUTLASS kernel and reference kernel are equal or not
+  bool passed = cutlass::reference::host::TensorEquals(
+    tensor_d.host_view(),
+    tensor_ref_d.host_view());
 
   // if (passed) {
   //   std::cout << "Runtime: " << result.runtime_ms << " ms" << std::endl;
   //   std::cout << " GFLOPs: " << result.gflops << std::endl;
   // }
 
-  // std::cout << (passed ? "Passed" : "Failed") << std::endl;
+  std::cout << (passed ? "Passed" : "Failed") << std::endl;
 
-  // return (passed ? 0  : -1);
+  return (passed ? 0  : -1);
 }
 
 int main(int argc, const char **argv) {

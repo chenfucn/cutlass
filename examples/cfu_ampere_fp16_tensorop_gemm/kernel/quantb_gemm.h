@@ -80,6 +80,8 @@ struct QuantBGemm {
     typename Mma::IteratorA::TensorRef ref_A;
     typename Mma::IteratorB::Params params_B;
     typename Mma::IteratorB::TensorRef ref_B;
+    typename Mma::IteratorW::Params params_W;
+    typename Mma::IteratorW::TensorRef ref_W;
     typename Mma::IteratorQScale::Params params_QScale;
     typename Mma::IteratorQScale::TensorRef ref_QScale;
     typename Epilogue::OutputTileIterator::Params params_C;
@@ -107,6 +109,7 @@ struct QuantBGemm {
       cutlass::gemm::GemmCoord const & grid_tiled_shape,
       typename Mma::IteratorA::TensorRef ref_A,
       typename Mma::IteratorB::TensorRef ref_B,
+      typename Mma::IteratorW::TensorRef ref_W,
       typename Mma::IteratorQScale::TensorRef ref_QScale,
       typename Epilogue::OutputTileIterator::TensorRef ref_C,
       typename Epilogue::OutputTileIterator::TensorRef ref_D,
@@ -123,6 +126,8 @@ struct QuantBGemm {
       ref_A(ref_A),
       params_B(ref_B.layout()),
       ref_B(ref_B),
+      params_W(ref_W.layout()),
+      ref_W(ref_W),
       params_QScale(ref_QScale.layout()),
       ref_QScale(ref_QScale),
       params_C(ref_C.layout()),
@@ -162,6 +167,7 @@ struct QuantBGemm {
     cutlass::gemm::GemmCoord const & problem_size,
     typename Mma::IteratorA::TensorRef ref_A,
     typename Mma::IteratorB::TensorRef ref_B,
+    typename Mma::IteratorW::TensorRef ref_W,
     typename Mma::IteratorQScale::TensorRef ref_QScale,
     typename Epilogue::OutputTileIterator::TensorRef ref_C,
     typename Epilogue::OutputTileIterator::TensorRef ref_D) {
@@ -195,6 +201,21 @@ struct QuantBGemm {
     }
 
     if (!TensorRef_aligned(ref_B, kAlignmentB)) {
+      return Status::kErrorMisalignedOperand;
+    }
+
+    if (problem_size.k() % Mma::Shape::kK != 0) {
+      // Currently we don't support this case due to the way
+      // predicate iterator works, it loads the partial tile
+      // in the first iteration and then the full tile in the
+      // remaining iterations. This will cause the blockwise
+      // quantization parameters to go out of step with the
+      // weights. We can fix this by adding a predicate iterator
+      // that loads the full tile in the first iterations and
+      // then the partial tile in the last iteration.
+      return Status::kErrorInvalidProblem;
+    }
+    if (!TensorRef_aligned(ref_W, kAlignmentB)) {
       return Status::kErrorMisalignedOperand;
     }
 
@@ -241,6 +262,10 @@ struct QuantBGemm {
       threadblock_tile_offset.n() * Mma::Shape::kN
     };
 
+    cutlass::MatrixCoord tb_offset_W{
+      tb_offset_B.row() / 2, tb_offset_B.column() / 2
+    };
+
     // Problem size is a function of threadblock index in the K dimension
     int problem_size_k = min(
       params.problem_size.k(), 
@@ -268,6 +293,14 @@ struct QuantBGemm {
       thread_idx,
       tb_offset_B,
       params.gather_B_indices);
+
+    typename Mma::IteratorW iterator_W(
+      params.params_W,
+      params.ref_W.data(),
+      {problem_size_k/2, params.problem_size.n()/2},
+      thread_idx,
+      tb_offset_W,
+      nullptr);
 
     int qscale_k = problem_size_k / Mma::QuantBlocking::kRow;
     int qscale_n = params.problem_size.n() / Mma::QuantBlocking::kColumn;
@@ -315,7 +348,7 @@ struct QuantBGemm {
 
     if (!kSplitKSerial || gemm_k_iterations > 0) {
       // Compute threadblock-scoped matrix multiply-add
-      mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_QScale, accumulators);
+      mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_W, iterator_QScale, accumulators);
     }
 
     //

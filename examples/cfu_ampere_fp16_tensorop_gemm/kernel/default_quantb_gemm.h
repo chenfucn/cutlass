@@ -92,6 +92,9 @@ template <
     /// Access granularity of B matrix in units of elements
     int kAlignmentB,
 
+    typename ElementWPack_,
+    typename LayoutWPack_,
+    int kAlignmentW_,
     typename ElementQScale_,
     typename QuantBlocking_,
     int kAlignmentQ_,
@@ -162,6 +165,9 @@ template <
     /// Access granularity of A matrix in units of elements
     int kAlignmentB,
 
+    typename ElementWPack,
+    typename LayoutWPack,
+    int kAlignmentW,
     typename ElementQScale,
     typename QuantBlocking,
     int kAlignmentQ,
@@ -205,12 +211,12 @@ template <
     typename PermuteBLayout
 >
 struct DefaultQuantBGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
-                   ElementQScale, QuantBlocking, kAlignmentQ,  ElementC,
-                   LayoutC, ElementAccumulator, arch::OpClassTensorOp,
-                   arch::Sm80, ThreadblockShape, WarpShape, InstructionShape,
-                   EpilogueOutputOp, ThreadblockSwizzle, Stages, SplitKSerial,
-                   Operator, SharedMemoryClear, GatherA, GatherB, ScatterD,
-                   PermuteDLayout, PermuteALayout, PermuteBLayout> {
+                         ElementWPack, LayoutWPack, kAlignmentW, ElementQScale, QuantBlocking,
+                         kAlignmentQ,  ElementC, LayoutC, ElementAccumulator,
+                         arch::OpClassTensorOp, arch::Sm80, ThreadblockShape, WarpShape,
+                         InstructionShape, EpilogueOutputOp, ThreadblockSwizzle, Stages,
+                         SplitKSerial, Operator, SharedMemoryClear, GatherA, GatherB, ScatterD,
+                         PermuteDLayout, PermuteALayout, PermuteBLayout> {
 
   static_assert((platform::is_same<LayoutC, layout::RowMajor>::value
              || platform::is_same<LayoutC, layout::AffineRankN<2>>::value),
@@ -219,6 +225,7 @@ struct DefaultQuantBGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAli
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultQuantBMma<
       ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
+      ElementWPack, LayoutWPack, kAlignmentW,
       ElementQScale, QuantBlocking, kAlignmentQ,
       ElementAccumulator, LayoutC, arch::OpClassTensorOp, arch::Sm80,
       ThreadblockShape, WarpShape, InstructionShape, Stages,

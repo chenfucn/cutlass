@@ -92,6 +92,8 @@ template <
     /// Layout of operand B
     typename LayoutB,
 
+    typename ElementWPack,
+    typename LayoutWPack,
     typename ElementQScale,
     typename QuantBlocking,
 
@@ -121,6 +123,9 @@ template <
         cutlass::arch::CacheOperation::Global,
     /// Cache operation of operand B
     cutlass::arch::CacheOperation::Kind CacheOpB =
+        cutlass::arch::CacheOperation::Global,
+    /// Cache operation of operand W
+    cutlass::arch::CacheOperation::Kind CacheOpW =
         cutlass::arch::CacheOperation::Global,
     /// per-element transformation for elements of A
     ComplexTransform TransformA = ComplexTransform::kNone,
@@ -152,6 +157,7 @@ template <
     /// Data type of B operand
     typename ElementB_,
 
+    typename ElementWPack_,
     typename ElementQScale_,
     typename QuantBlocking_,
 
@@ -166,12 +172,14 @@ template <
     /// Cache operation of operand A
     cutlass::arch::CacheOperation::Kind CacheOpA,
     /// Cache operation of operand B
-    cutlass::arch::CacheOperation::Kind CacheOpB>
+    cutlass::arch::CacheOperation::Kind CacheOpB,
+    cutlass::arch::CacheOperation::Kind CacheOpW>
 struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
                       layout::RowMajor, ElementB_, layout::ColumnMajor,
+                      ElementWPack_, layout::ColumnMajor,
                       ElementQScale_, QuantBlocking_,
                       ElementC_, LayoutC_, arch::OpClassTensorOp, Stages,
-                      Operator_, false, CacheOpA, CacheOpB> {
+                      Operator_, false, CacheOpA, CacheOpB, CacheOpW> {
   using Shape = Shape_;
   using WarpShape = WarpShape_;
   using InstructionShape = InstructionShape_;
@@ -180,6 +188,8 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   using ElementB = ElementB_;
   using LayoutB = layout::ColumnMajor;
 
+  using ElementWPack = ElementWPack_;
+  using LayoutWPack = layout::ColumnMajor;
   using ElementQScale = ElementQScale_;
   using QuantBlocking = QuantBlocking_;
 
@@ -188,6 +198,7 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   static int const kStages = Stages;
   static cutlass::arch::CacheOperation::Kind const kCacheOpA = CacheOpA;
   static cutlass::arch::CacheOperation::Kind const kCacheOpB = CacheOpB;
+  static cutlass::arch::CacheOperation::Kind const kCacheOpW = CacheOpW;
 
   /// Number of warps present
   using WarpCount = GemmShape<Shape::kM / WarpShape::kM,
@@ -224,6 +235,12 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   static int const kWarpThreadArrangementStridedB =
       kWarpSize / kWarpThreadArrangementContiguousB;
 
+  static int const kWarpThreadArrangementContiguousW =
+      (Shape::kK / 2) / (kAccessSizeInBits / sizeof_bits<ElementWPack>::value);
+
+  static int const kWarpThreadArrangementStridedW =
+      kWarpSize / kWarpThreadArrangementContiguousW;
+
   //
   // Shared memory layouts
   //
@@ -234,6 +251,9 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   // Shared memory layout
   using SmemLayoutB = layout::ColumnMajorTensorOpMultiplicandCrosswise<
       sizeof_bits<ElementB>::value, Shape::kK>;
+
+  using SmemLayoutW = layout::ColumnMajorTensorOpMultiplicandCrosswise<
+      sizeof_bits<ElementWPack>::value, Shape::kK/2>;
 
   //
   // Iterators to write to shared memory
@@ -264,6 +284,16 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
       IteratorThreadMapB>;
 
   /// Quantization parameters
+  using IteratorThreadMapW = transform::PitchLinearWarpRakedThreadMap<
+      layout::PitchLinearShape<Shape::kK/2, Shape::kN/2>, kThreads,
+      layout::PitchLinearShape<kWarpThreadArrangementContiguousW,
+                               kWarpThreadArrangementStridedW>,
+      kAccessSizeInBits / sizeof_bits<ElementWPack>::value>;
+
+  using SmemIteratorW = transform::threadblock::RegularTileAccessIterator<
+      MatrixShape<Shape::kK/2, Shape::kN/2>, ElementWPack, SmemLayoutW, 1,
+      IteratorThreadMapW>;
+
   static cutlass::arch::CacheOperation::Kind const kCacheOpQScale =
       cutlass::arch::CacheOperation::Global;
 
@@ -299,6 +329,7 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   // Define the warp-level tensor op
   using MmaTensorOp = typename cutlass::gemm::warp::DefaultQuantBMmaTensorOp<
       WarpShape, InstructionShape, ElementA, SmemLayoutA, ElementB, SmemLayoutB,
+        ElementWPack, SmemLayoutW,
       ElementQScale, SmemLayoutQScale, QuantBlocking,
       ElementC, LayoutC, Operator, WarpCount::kK>::Type;
 
