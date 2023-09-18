@@ -152,13 +152,12 @@ template <
   typename ElementB_,
   /// Layout of B matrix (concept: MatrixLayout)
   typename LayoutB_,
-
-  typename ElementWPack_,
-  typename LayoutWPack_,
+  /// Data type of quant scales
   typename ElementQScale_,
+  /// Layout of quant scales (concept: MatrixLayout)
   typename SmemLayoutQScale_,
+  /// Blocking dimensions of quantization
   typename QuantBlocking_,
-
   /// Element type of C matrix
   typename ElementC_,
   /// Layout of C matrix (concept: MatrixLayout)
@@ -189,9 +188,6 @@ public:
 
   /// Layout of multiplicand B
   using LayoutB = LayoutB_;
-
-  using ElementWPack = ElementWPack_;
-  using LayoutWPack = LayoutWPack_;
 
   /// Data type of accumulator matrix C
   using ElementC = ElementC_;
@@ -246,8 +242,8 @@ public:
 
   /// Iterates over the B operand in memory
   using IteratorB = QuantBMmaTensorOpMultiplicandTileIterator<
-      MatrixShape<Shape::kK, Shape::kN>, Operand::kB, ElementB, LayoutB,
-      MatrixShape<ArchMmaOperator::Shape::kK, ArchMmaOperator::Shape::kN>,
+      MatrixShape<Shape::kK/2, Shape::kN/2>, Operand::kB, ElementB, LayoutB,
+      MatrixShape<ArchMmaOperator::Shape::kK/2, ArchMmaOperator::Shape::kN/2>,
       Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
   // warp B MatrixShape<64, 64>, 
   // layout B cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<16, 64>, 
@@ -256,17 +252,15 @@ public:
   // FragmentB::kElements 32
 
   /// Storage for B tile
-  using FragmentB = typename IteratorB::Fragment;
+  using FragmentB = typename IteratorB::Fragment; // cutlass::Array<cutlass::half_t, 8>
 
   /// Storage for transformed B tile
+  /// When loading weights, we packed 4 int4 weights into one 2-byte-element, when expanded
+  /// we multiply the number of elements by 4.
+  /// TODO: make sure ArchMmaOperator::ElementB same as dequantized ElementB
+  /// and change the transform function below to perform dequantization
   using TransformedFragmentB =
-      Array<typename ArchMmaOperator::ElementB, FragmentB::kElements>;
-
-  using IteratorW = QuantBMmaTensorOpMultiplicandTileIterator<
-      MatrixShape<Shape::kK/2, Shape::kN/2>, Operand::kB, ElementWPack, LayoutWPack,
-      MatrixShape<ArchMmaOperator::Shape::kK/2, ArchMmaOperator::Shape::kN/2>,
-      Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
-  using FragmentW = typename IteratorW::Fragment; // cutlass::Array<cutlass::half_t, 8>
+      Array<typename ArchMmaOperator::ElementB, FragmentB::kElements * 4>;
 
   /// Iterates over the C operand in memory
   using IteratorC = MmaTensorOpAccumulatorTileIterator<
@@ -407,7 +401,8 @@ public:
   /// Transform the mma operands to the required types
   CUTLASS_DEVICE
   void transform(TransformedFragmentA &dst_A, TransformedFragmentB &dst_B,
-                 FragmentA const &A, FragmentB const &B) const {
+                 FragmentA const &A, FragmentB const &B,
+                 FragmentQScale const &scales) const {
 
     //
     // Define conversions from source type to instruction type
@@ -415,42 +410,28 @@ public:
     FloatRoundStyle const kRoundA =
         PreferredRoundingMode<typename ArchMmaOperator::ElementA,
                               ElementA>::kRound;
-    FloatRoundStyle const kRoundB =
-        PreferredRoundingMode<typename ArchMmaOperator::ElementB,
-                              ElementB>::kRound;
+
+    Array<uint8_t, FragmentB::kElements * 2> const *ptr_B =
+        reinterpret_cast<Array<uint8_t, FragmentB::kElements * 2> const *>(&B);
+    IteratorQScale::dequant(scales, *ptr_B, dst_B);
+
     #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
       internal::ConvertAndPack<typename ArchMmaOperator::ElementA, ElementA,
                             FragmentA::kElements, kRoundA>
           convert_A;
-      NumericArrayConverter<typename ArchMmaOperator::ElementB, ElementB,
-                            FragmentB::kElements / 2, kRoundB>
-          convert_B;
-      Array<ElementB, FragmentB::kElements / 2> const *ptr_B =
-          reinterpret_cast<Array<ElementB, FragmentB::kElements / 2> const *>(&B);
-      Array<typename ArchMmaOperator::ElementB, FragmentB::kElements / 2> *
-          ptr_dst_B = reinterpret_cast<Array<typename ArchMmaOperator::ElementB,
-                                             FragmentB::kElements / 2> *>(&dst_B);
   
       dst_A = convert_A(A);
-  
-      ptr_dst_B[0] = convert_B(ptr_B[0]);
-      ptr_dst_B[1] = convert_B(ptr_B[1]);
 
     #elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
       internal::ConvertAndPack<typename ArchMmaOperator::ElementA, ElementA,
                             FragmentA::kElements / 2, kRoundA>
           convert_A;
-      NumericArrayConverter<typename ArchMmaOperator::ElementB, ElementB,
-                            FragmentB::kElements, kRoundB>
-          convert_B;
       Array<ElementA, FragmentA::kElements / 2> const *ptr_A =
           reinterpret_cast<Array<ElementA, FragmentA::kElements / 2> const *>(&A);
       Array<typename ArchMmaOperator::ElementA, FragmentA::kElements / 2> *
           ptr_dst_A = reinterpret_cast<Array<typename ArchMmaOperator::ElementA,
                                              FragmentA::kElements / 2> *>(&dst_A);
-  
-      dst_B = convert_B(B);
-  
+    
       ptr_dst_A[0] = convert_A(ptr_A[0]);
       ptr_dst_A[1] = convert_A(ptr_A[1]);
     #else

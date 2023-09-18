@@ -80,8 +80,6 @@ struct QuantBGemm {
     typename Mma::IteratorA::TensorRef ref_A;
     typename Mma::IteratorB::Params params_B;
     typename Mma::IteratorB::TensorRef ref_B;
-    typename Mma::IteratorW::Params params_W;
-    typename Mma::IteratorW::TensorRef ref_W;
     typename Mma::IteratorQScale::Params params_QScale;
     typename Mma::IteratorQScale::TensorRef ref_QScale;
     typename Epilogue::OutputTileIterator::Params params_C;
@@ -109,7 +107,6 @@ struct QuantBGemm {
       cutlass::gemm::GemmCoord const & grid_tiled_shape,
       typename Mma::IteratorA::TensorRef ref_A,
       typename Mma::IteratorB::TensorRef ref_B,
-      typename Mma::IteratorW::TensorRef ref_W,
       typename Mma::IteratorQScale::TensorRef ref_QScale,
       typename Epilogue::OutputTileIterator::TensorRef ref_C,
       typename Epilogue::OutputTileIterator::TensorRef ref_D,
@@ -126,8 +123,6 @@ struct QuantBGemm {
       ref_A(ref_A),
       params_B(ref_B.layout()),
       ref_B(ref_B),
-      params_W(ref_W.layout()),
-      ref_W(ref_W),
       params_QScale(ref_QScale.layout()),
       ref_QScale(ref_QScale),
       params_C(ref_C.layout()),
@@ -144,7 +139,7 @@ struct QuantBGemm {
       
       gemm_k_size = gemm_k_iterations * Mma::Shape::kK;
 
-    semaphore = workspace;
+      semaphore = workspace;
     }
   };
 
@@ -167,7 +162,6 @@ struct QuantBGemm {
     cutlass::gemm::GemmCoord const & problem_size,
     typename Mma::IteratorA::TensorRef ref_A,
     typename Mma::IteratorB::TensorRef ref_B,
-    typename Mma::IteratorW::TensorRef ref_W,
     typename Mma::IteratorQScale::TensorRef ref_QScale,
     typename Epilogue::OutputTileIterator::TensorRef ref_C,
     typename Epilogue::OutputTileIterator::TensorRef ref_D) {
@@ -215,9 +209,6 @@ struct QuantBGemm {
       // then the partial tile in the last iteration.
       return Status::kErrorInvalidProblem;
     }
-    if (!TensorRef_aligned(ref_W, kAlignmentB)) {
-      return Status::kErrorMisalignedOperand;
-    }
 
     if (!TensorRef_aligned(ref_QScale, Mma::IteratorQScale::AccessType::kElements)) {
       return Status::kErrorMisalignedOperand;
@@ -258,12 +249,8 @@ struct QuantBGemm {
     };
 
     cutlass::MatrixCoord tb_offset_B{
-      threadblock_tile_offset.k() * params.gemm_k_size,
-      threadblock_tile_offset.n() * Mma::Shape::kN
-    };
-
-    cutlass::MatrixCoord tb_offset_W{
-      tb_offset_B.row() / 2, tb_offset_B.column() / 2
+      (threadblock_tile_offset.k() * params.gemm_k_size) / 2,
+      (threadblock_tile_offset.n() * Mma::Shape::kN) / 2
     };
 
     // Problem size is a function of threadblock index in the K dimension
@@ -289,18 +276,10 @@ struct QuantBGemm {
     typename Mma::IteratorB iterator_B(
       params.params_B,
       params.ref_B.data(),
-      {problem_size_k, params.problem_size.n()},
+      {problem_size_k/2, params.problem_size.n()/2},
       thread_idx,
       tb_offset_B,
       params.gather_B_indices);
-
-    typename Mma::IteratorW iterator_W(
-      params.params_W,
-      params.ref_W.data(),
-      {problem_size_k/2, params.problem_size.n()/2},
-      thread_idx,
-      tb_offset_W,
-      nullptr);
 
     int qscale_k = problem_size_k / Mma::QuantBlocking::kRow;
     int qscale_n = params.problem_size.n() / Mma::QuantBlocking::kColumn;
@@ -348,7 +327,7 @@ struct QuantBGemm {
 
     if (!kSplitKSerial || gemm_k_iterations > 0) {
       // Compute threadblock-scoped matrix multiply-add
-      mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_W, iterator_QScale, accumulators);
+      mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_QScale, accumulators);
     }
 
     //

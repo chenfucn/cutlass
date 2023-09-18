@@ -221,8 +221,6 @@ using Gemm = cutlass::gemm::device::QuantBGemm<ElementInputA,
                                          LayoutInputA,
                                          ElementInputB,
                                          LayoutInputB,
-                                         ElementWPack,
-                                         LayoutInputWPack,
                                          ElementQScale,
                                          QuantBlocking,
                                          ElementOutput,
@@ -302,8 +300,8 @@ int run(Options &options) {
           auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
           auto val = (loop_val + offset) % 256;
           tensor_weight.at(weight_cord) = ElementW(val);
-          tensor_b.at({weight_cord[0] * 2, weight_cord[1]}) = ElementInputB(val & 0x0f);
-          tensor_b.at({weight_cord[0] * 2 + 1, weight_cord[1]}) = ElementInputB(val >> 4);
+          tensor_b.at({weight_cord[0] * 2, weight_cord[1]}) = ElementInputB(val & 0x0f) - 8;
+          tensor_b.at({weight_cord[0] * 2 + 1, weight_cord[1]}) = ElementInputB(val >> 4) - 8;
           auto b_cord = cutlass::make_Coord(weight_cord[0] * 2, weight_cord[1]);
           loop_val++;
           if (loop_val == 256) {
@@ -319,7 +317,7 @@ int run(Options &options) {
     for (int row = 0; row < tensor_scale.extent().row(); ++row) {
       auto scale_cord = cutlass::make_Coord(row, col);
       auto weight_cord = cutlass::make_Coord(row * QuantBlocking::kRow, col * QuantBlocking::kColumn);
-      tensor_scale.at(scale_cord) = tensor_b.at(weight_cord);
+      tensor_scale.at(scale_cord) = 1 /*tensor_b.at(weight_cord)*/;
     }
   }
   std::cout << "Matrix B:\n" << tensor_b.host_view() << "\n";
@@ -403,7 +401,6 @@ int run(Options &options) {
   // instantiated CUTLASS kernel
   typename Gemm::Arguments arguments{problem_size,  // <- problem size of matrix multiplication
                                      tensor_a.device_ref(),  // <- reference to matrix A on device
-                                     tensor_b.device_ref(),  // <- reference to matrix B on device
                                      ref_W,                  // <- reference to packed weights on device
                                      tensor_scale.device_ref(),  // <- reference to matrix Scale on device
                                      tensor_c.device_ref(),  // <- reference to matrix C on device

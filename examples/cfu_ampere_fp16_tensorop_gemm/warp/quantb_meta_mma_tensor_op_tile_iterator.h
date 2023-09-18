@@ -114,7 +114,8 @@ public:
   /// would share the same data.
   static int const kMmaIterations = (kMmaIterationsB + kNRepeats - 1) / kNRepeats;
 
-  // using Fragment = Array<Element, kNumBsPerMmaTileFragement * kBTilesPerMma * kMmaIterationsB>;
+  static int const kExpandedSize = kNumBsPerMmaTileFragement * kBTilesPerMma * kMmaIterationsB;
+
   using Fragment = Array<Element, kMmaTileFragementSize * kTilesPerMma * kMmaIterations>;
 
   using AccessType = Array<Element, kMmaTileFragementSize>;
@@ -184,11 +185,8 @@ public:
   }
 
   CUTLASS_HOST_DEVICE
-  Array<Element, kNumBsPerMmaTileFragement * kBTilesPerMma * kMmaIterationsB> debug_expand(Fragment const &frag){
-    // if (warp_idx_ == 1 && thread_idx_ != 0 && lane_idx_ == 0){
-    //     printf("b_row: %d, b_column: %d, meta_column: %d\n", b_row, b_column, meta_column);
-    // }
-    Array<Element, kNumBsPerMmaTileFragement * kBTilesPerMma * kMmaIterationsB> ret;
+  static Array<Element, kExpandedSize> debug_expand(Fragment const &frag){
+    Array<Element, kExpandedSize> ret;
     int out_idx = 0;
     for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
       int n_idx = n_out / kNRepeats;
@@ -203,6 +201,32 @@ public:
       }
     }
     return ret;
+  }
+
+  CUTLASS_HOST_DEVICE
+  static void dequant(Fragment const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<Element, kExpandedSize>& dest){
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < kExpandedSize/2; ++i) {
+      dest[i * 2] = static_cast<Element>(int(weights[i] & 0x0f) - 8);
+      dest[i * 2 + 1] = static_cast<Element>(int(weights[i] >> 4) - 8);
+    }
+
+    int out_idx = 0;
+    CUTLASS_PRAGMA_UNROLL
+    for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
+      int n_idx = n_out / kNRepeats;
+      CUTLASS_PRAGMA_UNROLL
+      for (int mma_tile_out_idx = 0; mma_tile_out_idx < kBTilesPerMma; mma_tile_out_idx++){
+        int mma_tile_idx = mma_tile_out_idx / (kBTilesPerMma / kTilesPerMma);
+        CUTLASS_PRAGMA_UNROLL
+        for (int elem_out_idx = 0; elem_out_idx < kNumBsPerMmaTileFragement; elem_out_idx++){
+          int elem_idx = elem_out_idx / BlockingShape::kRow;
+          int idx = elem_idx + mma_tile_idx * kMmaTileFragementSize + n_idx * kMmaTileFragementSize * kTilesPerMma;
+          dest[out_idx] = dest[out_idx] * scales[idx];
+          out_idx++;
+        }
+      }
+    }
   }
 
   /// Advances the pointer

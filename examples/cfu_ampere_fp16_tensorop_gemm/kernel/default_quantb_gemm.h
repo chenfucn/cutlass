@@ -91,14 +91,12 @@ template <
     typename LayoutB_,
     /// Access granularity of B matrix in units of elements
     int kAlignmentB,
-
-    typename ElementWPack_,
-    typename LayoutWPack_,
-    int kAlignmentW_,
+    /// Element type for quant scales
     typename ElementQScale_,
+    /// Blocking dimensions for quantization
     typename QuantBlocking_,
+    /// Access granularity of quant scales in units of elements
     int kAlignmentQ_,
-
     /// Element type for C and D matrix operands
     typename ElementC_,
     /// Layout type for C and D matrix operands
@@ -164,14 +162,12 @@ template <
     typename LayoutB,
     /// Access granularity of A matrix in units of elements
     int kAlignmentB,
-
-    typename ElementWPack,
-    typename LayoutWPack,
-    int kAlignmentW,
+    /// Element type for quant scales
     typename ElementQScale,
+    /// Blocking dimensions for quantization
     typename QuantBlocking,
+    /// Access granularity of quant scales in units of elements
     int kAlignmentQ,
-
     /// Element type for C and D matrix operands
     typename ElementC,
     /// Layout type for C and D matrix operand
@@ -211,8 +207,8 @@ template <
     typename PermuteBLayout
 >
 struct DefaultQuantBGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
-                         ElementWPack, LayoutWPack, kAlignmentW, ElementQScale, QuantBlocking,
-                         kAlignmentQ,  ElementC, LayoutC, ElementAccumulator,
+                         ElementQScale, QuantBlocking, kAlignmentQ,
+                         ElementC, LayoutC, ElementAccumulator,
                          arch::OpClassTensorOp, arch::Sm80, ThreadblockShape, WarpShape,
                          InstructionShape, EpilogueOutputOp, ThreadblockSwizzle, Stages,
                          SplitKSerial, Operator, SharedMemoryClear, GatherA, GatherB, ScatterD,
@@ -225,7 +221,6 @@ struct DefaultQuantBGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAli
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultQuantBMma<
       ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
-      ElementWPack, LayoutWPack, kAlignmentW,
       ElementQScale, QuantBlocking, kAlignmentQ,
       ElementAccumulator, LayoutC, arch::OpClassTensorOp, arch::Sm80,
       ThreadblockShape, WarpShape, InstructionShape, Stages,
