@@ -209,7 +209,7 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
   using IteratorQScale =
       cutlass::transform::threadblock::PredicatedTileAccessIterator<
           typename MmaCore::ThreadblockQScaleShape,
-          ElementQScale, LayoutB, 1, ThreadMapQScale, AccessTypeQScale>;
+          ElementQScale, LayoutB, 0, ThreadMapQScale, AccessTypeQScale>;
 
   // Define the threadblock-scoped multistage matrix multiply
   using ThreadblockMma = cutlass::gemm::threadblock::QuantBMmaMultistage<

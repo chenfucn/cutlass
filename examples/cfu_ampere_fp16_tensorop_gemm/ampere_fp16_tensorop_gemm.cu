@@ -101,7 +101,7 @@ struct Options {
   
   Options():
     help(false),
-    problem_size({32, 128, 128}),
+    problem_size({128, 256, 1024}),
     batch_count(1),
     reference_check(true),
     iterations(20),
@@ -174,11 +174,13 @@ using ElementInputB = cutlass::half_t;              // <- data type of elements 
 using ElementOutput = float;                        // <- data type of elements in output matrix D
 
 // Quantization parameter for B matrix
-using ElementW = uint8_t;                           // <- Weight is int4, using int8 for two of them
-using ElementWPack = cutlass::half_t;               // <- Weight is int4, packed into group of 4, pretending to be 16b type to reuse tile iterators
+using ElementW = uint8_t;                           // <- Weight is int4, uint8 for two of them
+// We pack 4 weights into one 16b element, so we can leverage cutlass tile iterators
+// for async share memory loading, and minimizing bank conflict during matrix loading
+using ElementWPack = cutlass::half_t;
 using LayoutInputWPack = cutlass::layout::ColumnMajor;  // <- layout of packed weight, must be column major
 using ElementQScale = cutlass::half_t;              // <- data type of quantization scale
-using QuantBlocking = cutlass::MatrixShape<1,16>;   // <- quantization blocking, one scale for each (1,16) block
+using QuantBlocking = cutlass::MatrixShape<1,16>;   // <- (1,16) or (1,32) weights block per scale
 
 // The code section below describes matrix layout of input and output matrices. Column Major for
 // Matrix A, Row Major for Matrix B and Row Major for Matrix C
@@ -194,12 +196,11 @@ using SmArch = cutlass::arch::Sm80;
 
 // This code section describes the tile size a thread block will compute
 using ShapeMMAThreadBlock =
-    cutlass::gemm::GemmShape<32, 64, 64>;
+    cutlass::gemm::GemmShape<32, 128, 64>;
 // This code section describes tile size a warp will compute
 using ShapeMMAWarp = cutlass::gemm::GemmShape<32, 64, 64>;
 // This code section describes the size of MMA op
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;
-
 
 // This code section describes how threadblocks are scheduled on GPU
 using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>;  // <- ??
@@ -243,16 +244,22 @@ int run(Options &options) {
   // Initialize tensors using CUTLASS helper functions
   cutlass::HostTensor<ElementInputA, LayoutInputA> tensor_a(
       problem_size.mk());  // <- Create matrix A with dimensions M x K
-  cutlass::HostTensor<ElementInputB, LayoutInputB> tensor_b(
-      problem_size.kn());  // <- Create matrix B with dimensions K x N
+
+  // Create weight matrix with dimensions K x N.
+  // Actual weight type is int4, we use ElementW = uint8 to avoid possible compilation
+  // troubles. Since the layout is column major, we are packing 2 weights in a column
+  // into one int8
+  cutlass::HostTensor<ElementW, LayoutInputB> tensor_weight(
+      {problem_size.k()/2, problem_size.n()});
+  // Create weight quantization scale with dimensions K x N
+  cutlass::HostTensor<ElementQScale, LayoutInputB> tensor_scale(
+      {problem_size.k()/QuantBlocking::kRow, problem_size.n()/QuantBlocking::kColumn});
+
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(
       problem_size.mn());  // <- Create matrix C with dimensions M x N
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d(
       problem_size.mn());  // <- Create matrix D with dimensions M x N used to store output from
                            // CUTLASS kernel
-  cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_ref_d(
-      problem_size.mn());  // <- Create matrix D with dimensions M x N used to store output from
-                           // reference kernel
 
   // Fill input and output matrices on host using CUTLASS helper functions
   cutlass::reference::host::TensorFillRandomUniform(
@@ -260,13 +267,19 @@ int run(Options &options) {
       1,
       ElementInputA(4),
       ElementInputA(-4),
-      0);  // <- Fill matrix A on host with uniform-distribution random data
-  // cutlass::reference::host::TensorFillRandomUniform(
-  //     tensor_b.host_view(),
-  //     1,
-  //     ElementInputB(4),
-  //     ElementInputB(-4),
-  //     0);  // <- Fill matrix B on host with uniform-distribution random data
+      2);  // <- Fill matrix A on host with uniform-distribution random data
+  cutlass::reference::host::TensorFillRandomUniform(
+      tensor_weight.host_view(),
+      1,
+      ElementW(1),
+      ElementW(254),
+      0);  // <- Fill weights on host with uniform-distribution random data
+  cutlass::reference::host::TensorFillRandomUniform(
+      tensor_scale.host_view(),
+      1,
+      ElementQScale(1.5),
+      ElementQScale(-1.5),
+      3);  // <- Fill weight scales on host with uniform-distribution random data
   cutlass::reference::host::TensorFillRandomUniform(
       tensor_c.host_view(),
       1,
@@ -275,54 +288,49 @@ int run(Options &options) {
       0);  // <- Fill matrix C on host with uniform-distribution random data
   cutlass::reference::host::TensorFill(
       tensor_d.host_view());  // <- fill matrix D on host with zeros
-  cutlass::reference::host::TensorFill(
-      tensor_ref_d.host_view());  // <- fill matrix D for reference on host with zeros
 
-  // Create quantization matrices
-  cutlass::HostTensor<ElementQScale, LayoutInputB> tensor_scale(
-      problem_size.kn()/cutlass::make_Coord(QuantBlocking::kRow, QuantBlocking::kColumn));  // <- Create matrix Scale with dimensions K x N
+  // // Fill tensor_weight with the patterned data, so that we can use
+  // // print to make sure the layout matches after loaded to registers
+  // int loop_val = 0;
+  // int offset = 3;
+  // for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
+  //   for (int row_tile = 0; row_tile < tensor_weight.extent().row()/4; ++row_tile) {
+  //     for (int col = 0; col < 8; ++col) {
+  //       for (int row = 0; row < 4; ++row) {
+  //         auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
+  //         auto val = (loop_val + offset) % 256;
+  //         tensor_weight.at(weight_cord) = ElementW(val);
+  //         loop_val++;
+  //         if (loop_val == 256) {
+  //           loop_val = 0;
+  //           offset += 5;
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 
-  // Create weight matrix with dimensions K x N.
-  // Actual weight type is int4, we use ElementW as int8 to avoid possible compilation
-  // troubles. Since the layout is column major, we are packing 2 weights in a column
-  // into one int8
-  cutlass::HostTensor<ElementW, LayoutInputB> tensor_weight(
-    cutlass::make_Coord(problem_size.k()/2, problem_size.n()));  // <- Create matrix Weight with dimensions K/2 x N
+  // int fill_val = -512;
+  // int factor = 1;
+  // for (int col = 0; col < tensor_scale.extent().column(); ++col){
+  //   for (int row = 0; row < tensor_scale.extent().row(); ++row){
+  //     tensor_scale.at({row, col}) = ElementQScale((float)fill_val * float(factor));
+  //     fill_val++;
+  //     if (fill_val == 512) {
+  //       fill_val = -512;
+  //       factor += 1;
+  //     }
+  //   }
+  // }
 
-  // Fill tensor_b and tensor_weight with the same patterned data, so that we can use
-  // print to make sure the layout matches after loaded to registers
-  int loop_val = 0;
-  int offset = 7;
-  for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
-    for (int row_tile = 0; row_tile < tensor_weight.extent().row()/4; ++row_tile) {
-      for (int col = 0; col < 8; ++col) {
-        for (int row = 0; row < 4; ++row) {
-          auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
-          auto val = (loop_val + offset) % 256;
-          tensor_weight.at(weight_cord) = ElementW(val);
-          tensor_b.at({weight_cord[0] * 2, weight_cord[1]}) = ElementInputB(val & 0x0f) - 8;
-          tensor_b.at({weight_cord[0] * 2 + 1, weight_cord[1]}) = ElementInputB(val >> 4) - 8;
-          auto b_cord = cutlass::make_Coord(weight_cord[0] * 2, weight_cord[1]);
-          loop_val++;
-          if (loop_val == 256) {
-            loop_val = 0;
-            offset+=3;
-          }
-        }
-      }
-    }
-  }
-
-  for (int col = 0; col < tensor_scale.extent().column(); ++col) {
-    for (int row = 0; row < tensor_scale.extent().row(); ++row) {
-      auto scale_cord = cutlass::make_Coord(row, col);
-      auto weight_cord = cutlass::make_Coord(row * QuantBlocking::kRow, col * QuantBlocking::kColumn);
-      tensor_scale.at(scale_cord) = 1 /*tensor_b.at(weight_cord)*/;
-    }
-  }
-  std::cout << "Matrix B:\n" << tensor_b.host_view() << "\n";
-  std::cout << "Matrix Weight:\n" << tensor_weight.host_view() << "\n";
-  std::cout << "Matrix Scale:\n" << tensor_scale.host_view() << "\n";
+  // std::cout << "Matrix Weight:\n" << tensor_weight.host_view() << "\n";
+  // std::cout << "================== Matrix Scale ==========================\n";
+  // for (int row = 0; row < tensor_scale.extent().row(); ++row){
+  //   for (int col = 0; col < tensor_scale.extent().column(); ++col){
+  //     printf("%.3f, ", float(tensor_scale.at({row, col})));
+  //   }
+  //   printf("\n");
+  // }
 
   /////////////////////////////////////////////////////////////////////////////
   // Prepack weight matrix to facilitate matrix loading, depending on MMA
@@ -350,7 +358,7 @@ int run(Options &options) {
   // T0[2, 7], T1[2, 7], T2[2, 7], T3[2, 7]
   // T0[3, 7], T1[3, 7], T2[3, 7], T3[3, 7]
   //
-  // This pack a 8x16 int8 tile into a 16x8 int8 tile.
+  // This pack a 8x16 int8 tile into a 16x8 int8 tile, i.e. a 8x8 16b tile
   /////////////////////////////////////////////////////////////////////////////
   cutlass::HostTensor<ElementW, LayoutInputB> tensor_weight_prepacked(
     cutlass::make_Coord(problem_size.k(), problem_size.n()/2));
@@ -376,16 +384,14 @@ int run(Options &options) {
     }
   }
 
-  std::cout << "Matrix Weight Prepacked:\n" << tensor_weight_prepacked.host_view() << "\n";
+  // std::cout << "Matrix Weight Prepacked:\n" << tensor_weight_prepacked.host_view() << "\n";
 
   // Copy data from host to GPU
   tensor_a.sync_device();
-  tensor_b.sync_device();
+  tensor_weight_prepacked.sync_device();
   tensor_scale.sync_device();
   tensor_c.sync_device();
   tensor_d.sync_device();
-  tensor_ref_d.sync_device();
-  tensor_weight_prepacked.sync_device();
   cutlass::TensorRef<ElementWPack const, LayoutInputWPack> ref_W(
     reinterpret_cast<ElementWPack const *>(tensor_weight_prepacked.device_data()),
     LayoutInputWPack::packed({problem_size.k()/2, problem_size.n()/2}));
@@ -452,7 +458,6 @@ int run(Options &options) {
     // Launch initialized CUTLASS kernel
     status = gemm_op();
     CUTLASS_CHECK(status);
-//    return 0;
 
   // //
   // // Run profiling loop
@@ -499,6 +504,34 @@ int run(Options &options) {
     (void)cudaEventDestroy(event);
   }
 
+  // Preparing reference kernel arguments
+  cutlass::HostTensor<ElementInputB, LayoutInputB> tensor_b(
+      problem_size.kn());  // <- Create dequantized matrix B with dimensions K x N
+  cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_ref_d(
+      problem_size.mn());  // <- Create matrix D with dimensions M x N used to store output from
+                           // reference kernel
+
+  // Dequantize weights and save into matrix B for reference
+  for (int col = 0; col < tensor_b.extent().column(); ++col){
+    for (int row = 0; row < tensor_b.extent().row(); ++row) {
+      auto weight_cord = cutlass::make_Coord(row/2, col);
+      int w = 0;
+      if (row % 2 == 0) {
+        w = int(tensor_weight.at(weight_cord) & 0x0f) - 8;
+      } else {
+        w = int(tensor_weight.at(weight_cord) >> 4) - 8;
+      }
+      auto scale_cord = cutlass::make_Coord(row / QuantBlocking::kRow, col / QuantBlocking::kColumn);
+      auto scale = tensor_scale.at(scale_cord);
+      tensor_b.at({row, col}) = scale * float(w);
+    }
+  }
+  cutlass::reference::host::TensorFill(
+      tensor_ref_d.host_view());  // <- fill matrix D for reference on host with zeros
+
+  tensor_b.sync_device();
+  tensor_ref_d.sync_device();
+
   // Create instantiation for device reference gemm kernel
   cutlass::reference::device::Gemm<ElementInputA,
                                    LayoutInputA,
@@ -531,10 +564,10 @@ int run(Options &options) {
     tensor_d.host_view(),
     tensor_ref_d.host_view());
 
-  // if (passed) {
-  //   std::cout << "Runtime: " << result.runtime_ms << " ms" << std::endl;
-  //   std::cout << " GFLOPs: " << result.gflops << std::endl;
-  // }
+  if (passed) {
+    std::cout << "Runtime: " << result.runtime_ms << " ms" << std::endl;
+    std::cout << " GFLOPs: " << result.gflops << std::endl;
+  }
 
   std::cout << (passed ? "Passed" : "Failed") << std::endl;
 

@@ -418,10 +418,9 @@ public:
   bool should_load_qscale_;
 
   /// Shared memory pointers for debug dumping
-  static const bool debug_layout = true;
+  static const bool debug_layout = false;
   using ShapeB = typename Base::SharedStorage::ShapeB;
   using ShapeQScale = typename Base::SharedStorage::ShapeQScale;
-  static_assert(PipeState::WarpTransformedFragmentB::kElements == 32, "WarpTransformedFragmentB::kElements != 32");
   typename IteratorB::Element* smem_b_ptr_;
   typename IteratorQScale::Element* smem_qscale_ptr_;
   int warp_id_;
@@ -531,7 +530,8 @@ public:
   CUTLASS_DEVICE
   void copy_tiles_and_advance(IteratorA &iterator_A, IteratorB &iterator_B,
                               IteratorQScale &iterator_QScale,
-                              int group_start_A = 0, int group_start_B = 0) {
+                              int group_start = 0) {
+    auto group_start_A = group_start * Detail::kAccessesPerGroupA;
     iterator_A.set_iteration_index(group_start_A *
                                    IteratorA::kAccessesPerVector);
     this->smem_iterator_A_.set_iteration_index(group_start_A);
@@ -567,6 +567,7 @@ public:
       }
     }
 
+    auto group_start_B = group_start * Detail::kAccessesPerGroupB;
     iterator_B.set_iteration_index(group_start_B *
                                    IteratorB::kAccessesPerVector);
     this->smem_iterator_B_.set_iteration_index(group_start_B);
@@ -602,14 +603,15 @@ public:
     }
 
     if (should_load_qscale_) {
-      iterator_QScale.set_iteration_index(group_start_B *
+      auto group_start_QScale = group_start * Detail::kAccessesPerGroupQScale;
+      iterator_QScale.set_iteration_index(group_start_QScale *
                                     IteratorQScale::kAccessesPerVector);
-      this->smem_iterator_QScale_.set_iteration_index(group_start_B);
+      this->smem_iterator_QScale_.set_iteration_index(group_start_QScale);
 
       // Async Copy for quantization scale
       CUTLASS_PRAGMA_UNROLL
       for (int j = 0; j < Detail::kAccessesPerGroupQScale; ++j) {
-        if (group_start_B + j < Detail::AsyncCopyIterationsPerStageQScale) {
+        if (group_start_QScale + j < Detail::AsyncCopyIterationsPerStageQScale) {
           typename IteratorQScale::AccessType *dst_ptr =
               reinterpret_cast<typename IteratorQScale::AccessType *>(
                   this->smem_iterator_QScale_.get());
@@ -841,13 +843,13 @@ public:
               printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
             }
           }
-          // {
-          //   auto array = Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[warp_mma_k % 2]);
-          //   typename IteratorQScale::Element *ptr = reinterpret_cast<typename IteratorQScale::Element *>(array.data());
-          //   for (int i = 0; i < 32/4; i++, ptr+=4){
-          //     printf("T%.2dQ%d, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
-          //   }
-          // }
+          {
+            auto array = Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[warp_mma_k % 2]);
+            typename IteratorQScale::Element *ptr = reinterpret_cast<typename IteratorQScale::Element *>(array.data());
+            for (int i = 0; i < PipeState::WarpTransformedFragmentB::kElements/4; i++, ptr+=4){
+              printf("T%.2dQ%d, %f, %f, %f, %f\n", threadIdx.x, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
+            }
+          }
         }
 
         warp_mma_.transform(
@@ -893,17 +895,11 @@ public:
       // Except for the last warp-tile, all warp-tiles issue their share of
       // global->shared fragment copies
       if (warp_mma_k < Base::kWarpGemmIterations - 1) {
-
-        int group_start_iteration_A, group_start_iteration_B;
-        group_start_iteration_A = warp_mma_k * Detail::kAccessesPerGroupA;
-        group_start_iteration_B = warp_mma_k * Detail::kAccessesPerGroupB;
-
         copy_tiles_and_advance(
             iterator_A,
             iterator_B,
             iterator_QScale,
-            group_start_iteration_A,
-            group_start_iteration_B);
+            warp_mma_k);
       }
 
       // The second-to-last warp-tile also:
@@ -912,15 +908,11 @@ public:
       if (warp_mma_k + 2 == Base::kWarpGemmIterations) {
 
         // Performs the last warp-tile's share of global->shared fragment copies
-        int group_start_iteration_A = (warp_mma_k + 1) * Detail::kAccessesPerGroupA;
-        int group_start_iteration_B = (warp_mma_k + 1) * Detail::kAccessesPerGroupB;
-
         copy_tiles_and_advance(
           iterator_A,
           iterator_B,
           iterator_QScale,
-          group_start_iteration_A,
-          group_start_iteration_B);
+          warp_mma_k + 1);
 
         // Inserts a memory fence between stages of cp.async instructions.
         cutlass::arch::cp_async_fence();
@@ -955,13 +947,13 @@ public:
               printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
             }
           }
-          // {
-          //   auto array = Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]);
-          //   typename IteratorQScale::Element *ptr = reinterpret_cast<typename IteratorQScale::Element *>(array.data());
-          //   for (int i = 0; i < 32/4; i++, ptr+=4){
-          //     printf("T%.2dQ%d, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
-          //   }
-          // }
+          {
+            auto array = Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]);
+            typename IteratorQScale::Element *ptr = reinterpret_cast<typename IteratorQScale::Element *>(array.data());
+            for (int i = 0; i < PipeState::WarpTransformedFragmentB::kElements/4; i++, ptr+=4){
+              printf("T%.2dQ%d, %f, %f, %f, %f\n", threadIdx.x, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
+            }
+          }
         }
 
         warp_mma_.transform(
@@ -1027,13 +1019,13 @@ public:
             printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
           }
         }
-        // {
-        //   auto array = Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[0]);
-        //   typename IteratorQScale::Element *ptr = reinterpret_cast<typename IteratorQScale::Element *>(array.data());
-        //   for (int i = 0; i < 32/4; i++, ptr+=4){
-        //     printf("T%.2dQ%d, %.0f, %.0f, %.0f, %.0f\n", threadIdx.x, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
-        //   }
-        // }
+        {
+          auto array = Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[0]);
+          typename IteratorQScale::Element *ptr = reinterpret_cast<typename IteratorQScale::Element *>(array.data());
+          for (int i = 0; i < PipeState::WarpTransformedFragmentB::kElements/4; i++, ptr+=4){
+            printf("T%.2dQ%d, %f, %f, %f, %f\n", threadIdx.x, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
+          }
+        }
       }
 
 
@@ -1061,15 +1053,6 @@ public:
     // Mainloop
     CUTLASS_GEMM_LOOP
     for (; gemm_k_iterations > (-Base::kStages + 1);) {
-
-      if (debug_layout && block_id_ == 1){
-        if (threadIdx.x == 0){
-          printf("stage: %d, gemm_k_iterations: %d\n", smem_write_stage_idx_, gemm_k_iterations);
-        }
-        cutlass::debug::dump_shmem(smem_b_ptr_, ShapeB::kCount);
-        cutlass::debug::dump_shmem(smem_qscale_ptr_, ShapeQScale::kCount);
-      }
-
       mac_loop_iter(
         pipe_state,
         accum,
