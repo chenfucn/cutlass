@@ -180,7 +180,11 @@ using ElementW = uint8_t;                           // <- Weight is int4, uint8 
 using ElementWPack = cutlass::half_t;
 using LayoutInputWPack = cutlass::layout::ColumnMajor;  // <- layout of packed weight, must be column major
 using ElementQScale = cutlass::half_t;              // <- data type of quantization scale
-using QuantBlocking = cutlass::MatrixShape<1,16>;   // <- (1,16) or (1,32) weights block per scale
+using QuantBlocking = cutlass::MatrixShape<32,1>;   // <- weights block per scale (1,16/32/64), (16/32/64,1)
+using LayoutInputQScale = 
+    std::conditional<QuantBlocking::kRow == 1,
+        cutlass::layout::ColumnMajor,
+        cutlass::layout::RowMajor>::type;  // <- layout of quantization scale
 
 // The code section below describes matrix layout of input and output matrices. Column Major for
 // Matrix A, Row Major for Matrix B and Row Major for Matrix C
@@ -223,6 +227,7 @@ using Gemm = cutlass::gemm::device::QuantBGemm<ElementInputA,
                                          ElementInputB,
                                          LayoutInputB,
                                          ElementQScale,
+                                         LayoutInputQScale,
                                          QuantBlocking,
                                          ElementOutput,
                                          LayoutOutput,
@@ -252,7 +257,7 @@ int run(Options &options) {
   cutlass::HostTensor<ElementW, LayoutInputB> tensor_weight(
       {problem_size.k()/2, problem_size.n()});
   // Create weight quantization scale with dimensions K x N
-  cutlass::HostTensor<ElementQScale, LayoutInputB> tensor_scale(
+  cutlass::HostTensor<ElementQScale, LayoutInputQScale> tensor_scale(
       {problem_size.k()/QuantBlocking::kRow, problem_size.n()/QuantBlocking::kColumn});
 
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(
@@ -324,13 +329,13 @@ int run(Options &options) {
   // }
 
   // std::cout << "Matrix Weight:\n" << tensor_weight.host_view() << "\n";
-  // std::cout << "================== Matrix Scale ==========================\n";
-  // for (int row = 0; row < tensor_scale.extent().row(); ++row){
-  //   for (int col = 0; col < tensor_scale.extent().column(); ++col){
-  //     printf("%.3f, ", float(tensor_scale.at({row, col})));
-  //   }
-  //   printf("\n");
-  // }
+  std::cout << "================== Matrix Scale ==========================\n";
+  for (int row = 0; row < tensor_scale.extent().row(); ++row){
+    for (int col = 0; col < tensor_scale.extent().column(); ++col){
+      printf("%.3f, ", float(tensor_scale.at({row, col})));
+    }
+    printf("\n");
+  }
 
   /////////////////////////////////////////////////////////////////////////////
   // Prepack weight matrix to facilitate matrix loading, depending on MMA

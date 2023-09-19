@@ -71,6 +71,8 @@ template <
     int kAlignmentB,
     /// Element type for quant scales
     typename ElementQScale_,
+    /// Layout for quant scales
+    typename LayoutQScale_,
     /// Blocking size for quantization
     typename QuantBlocking_,
     /// Access granularity of quant scales in units of elements
@@ -127,6 +129,8 @@ template <
     int kAlignmentB,
     /// Element type for quant scales
     typename ElementQScale,
+    /// Layout for quant scales
+    typename LayoutQScale,
     /// Blocking size for quantization
     typename QuantBlocking,
     /// Access granularity of quant scales in units of elements
@@ -159,7 +163,7 @@ template <
     typename PermuteBLayout
     >
 struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
-                  kAlignmentB, ElementQScale, QuantBlocking, kAlignmentQ,
+                  kAlignmentB, ElementQScale, LayoutQScale, QuantBlocking, kAlignmentQ,
                   ElementAccumulator, LayoutC,
                   arch::OpClassTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, Stages, Operator, false, SharedMemoryClear,
@@ -182,7 +186,7 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultQuantBMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, ElementA, LayoutA,
-      ElementB, LayoutB, ElementQScale, QuantBlocking,
+      ElementB, LayoutB, ElementQScale, LayoutQScale, QuantBlocking,
       ElementAccumulator, LayoutC, arch::OpClassTensorOp,
       Stages, Operator, false, CacheOpA, CacheOpB>;
 
@@ -209,7 +213,7 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
   using IteratorQScale =
       cutlass::transform::threadblock::PredicatedTileAccessIterator<
           typename MmaCore::ThreadblockQScaleShape,
-          ElementQScale, LayoutB, 0, ThreadMapQScale, AccessTypeQScale>;
+          ElementQScale, LayoutQScale, 0, ThreadMapQScale, AccessTypeQScale>;
 
   // Define the threadblock-scoped multistage matrix multiply
   using ThreadblockMma = cutlass::gemm::threadblock::QuantBMmaMultistage<

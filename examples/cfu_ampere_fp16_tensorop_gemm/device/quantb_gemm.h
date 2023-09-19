@@ -177,6 +177,8 @@ template <
     typename LayoutB_,
     /// Element type for quant scales
     typename ElementQScale_,
+    /// Layout type for quant scales
+    typename LayoutQScale_,
     /// Blocking dimensions for quantization
     typename QuantBlocking_,
     /// Element type for C and D matrix operands
@@ -270,6 +272,7 @@ class QuantBGemm {
   static_assert(InstructionShape::kK == 16,
                 "InstructionShape::kK must be a multiple of 16 (2 tiles), required by 4b weight packing layout.");
   using ElementQScale = ElementQScale_;
+  using LayoutQScale = LayoutQScale_;
   using QuantBlocking = QuantBlocking_;
   static int const kAlignmentQ = 128 / sizeof_bits<ElementQScale>::value;
 
@@ -282,6 +285,7 @@ class QuantBGemm {
     LayoutB,
     kAlignmentB,
     ElementQScale,
+    LayoutQScale,
     QuantBlocking,
     kAlignmentQ,
     ElementC,
@@ -316,9 +320,7 @@ class QuantBGemm {
     TensorRef<ElementB const, LayoutB> ref_B;
     TensorRef<ElementC const, LayoutC> ref_C;
     TensorRef<ElementC, LayoutC> ref_D;
-
-    // Quantization parameter should be the same layout as B
-    TensorRef<ElementQScale const, LayoutB> ref_Qscale;
+    TensorRef<ElementQScale const, LayoutQScale> ref_Qscale;
 
     typename EpilogueOutputOp::Params epilogue;
     int split_k_slices;
@@ -343,7 +345,7 @@ class QuantBGemm {
       GemmCoord problem_size_,
       TensorRef<ElementA const, LayoutA> ref_A_,
       TensorRef<ElementB const, LayoutB> ref_B_,
-      TensorRef<ElementQScale const, LayoutB> ref_Qscale_,
+      TensorRef<ElementQScale const, LayoutQScale> ref_Qscale_,
       TensorRef<ElementC const, LayoutC> ref_C_,
       TensorRef<ElementC, LayoutC> ref_D_,
       typename EpilogueOutputOp::Params epilogue_ = 

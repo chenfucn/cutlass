@@ -93,6 +93,8 @@ template <
     typename LayoutB,
     /// Element data type of quant scale
     typename ElementQScale,
+    /// Layout of quant scale
+    typename LayoutQScale,
     /// Blocking dimensions for quantization
     typename QuantBlocking,
     /// Data type of accumulator
@@ -153,6 +155,8 @@ template <
     typename ElementB_,
     /// Element data type of quant scale
     typename ElementQScale_,
+    /// Layout of quant scale
+    typename LayoutQScale_,
     /// Blocking dimensions for quantization
     typename QuantBlocking_,
     /// Data type of accumulator
@@ -169,7 +173,7 @@ template <
     cutlass::arch::CacheOperation::Kind CacheOpB>
 struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
                       layout::RowMajor, ElementB_, layout::ColumnMajor,
-                      ElementQScale_, QuantBlocking_,
+                      ElementQScale_, LayoutQScale_, QuantBlocking_,
                       ElementC_, LayoutC_, arch::OpClassTensorOp, Stages,
                       Operator_, false, CacheOpA, CacheOpB> {
   using Shape = Shape_;
@@ -181,6 +185,7 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   using LayoutB = layout::ColumnMajor;
 
   using ElementQScale = ElementQScale_;
+  using LayoutQScale = LayoutQScale_;
   using QuantBlocking = QuantBlocking_;
 
   using ElementC = ElementC_;
@@ -265,18 +270,26 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   static cutlass::arch::CacheOperation::Kind const kCacheOpQScale =
       cutlass::arch::CacheOperation::Global;
 
-  using SmemLayoutQScale = LayoutB; // quant layout must be column major, the same with B
+  using SmemLayoutQScale = LayoutQScale;
 
   using ThreadblockQScaleShape = MatrixShape<Shape::kK / QuantBlocking::kRow, Shape::kN / QuantBlocking::kColumn>;
   static_assert(Shape::kK % QuantBlocking::kRow == 0, "K must be multiple of QuantBlocking::kRow");
   static_assert(Shape::kN % QuantBlocking::kColumn == 0, "N must be multiple of QuantBlocking::kColumn");
   static_assert(ThreadblockQScaleShape::kCount > 0, "QuantBlocking too big to fit in a thread block!");
+  static_assert(QuantBlocking::kRow == 1 || QuantBlocking::kColumn == 1,
+        "Only support single column or row quantize blocking!");
+  static_assert(QuantBlocking::kColumn != 1 || std::is_same<LayoutQScale, layout::RowMajor>::value,
+        "Quant scale matrix's major dimension must have more elements, to facilitate fast loading!");
 
   /// By default we would like to use 128b load. However, we can't load more than
   /// a column at a time in a column major layout.
+  using QScalePitchLinearShape = typename std::conditional<
+      std::is_same<LayoutQScale, layout::RowMajor>::value,
+      layout::PitchLinearShape<ThreadblockQScaleShape::kColumn, ThreadblockQScaleShape::kRow>,
+      layout::PitchLinearShape<ThreadblockQScaleShape::kRow, ThreadblockQScaleShape::kColumn>>::type;
   static int const kElementsPerAccessQScale =
-      (kAccessSizeInBits / sizeof_bits<ElementQScale>::value) > ThreadblockQScaleShape::kRow
-          ? ThreadblockQScaleShape::kRow
+      (kAccessSizeInBits / sizeof_bits<ElementQScale>::value) > QScalePitchLinearShape::kContiguous
+          ? QScalePitchLinearShape::kContiguous
           : (kAccessSizeInBits / sizeof_bits<ElementQScale>::value);
 
   /// quant scale is tiny.  Not all threads are needed.
@@ -284,8 +297,7 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   static int const kThreadsQScale = (kAccessCntQScale > kThreads) ? kThreads : kAccessCntQScale;
 
   using IteratorThreadMapQScale = transform::PitchLinearStripminedThreadMap<
-      layout::PitchLinearShape<ThreadblockQScaleShape::kRow, ThreadblockQScaleShape::kColumn>,
-      kThreadsQScale, kElementsPerAccessQScale>;
+      QScalePitchLinearShape, kThreadsQScale, kElementsPerAccessQScale>;
 
   using SmemIteratorQScale = transform::threadblock::RegularTileAccessIterator<
         ThreadblockQScaleShape, ElementQScale, SmemLayoutQScale, 1, IteratorThreadMapQScale>;

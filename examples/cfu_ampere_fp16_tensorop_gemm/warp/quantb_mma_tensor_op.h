@@ -52,8 +52,8 @@
 
 #include "cutlass/gemm/warp/mma_tensor_op_policy.h"
 
-#include "warp/quantb_mma_tensor_op_tile_iterator.h"
-//#include "cutlass/gemm/warp/mma_tensor_op_tile_iterator_sm80.h"
+//#include "warp/quantb_mma_tensor_op_tile_iterator.h"
+#include "cutlass/gemm/warp/mma_tensor_op_tile_iterator_sm80.h"
 
 #include "warp/quantb_meta_mma_tensor_op_tile_iterator.h"
 
@@ -228,7 +228,7 @@ public:
 public:
 
   /// Iterates over the A operand in memory
-  using IteratorA = QuantBMmaTensorOpMultiplicandTileIterator<
+  using IteratorA = MmaTensorOpMultiplicandTileIterator<
      MatrixShape<Shape::kM, Shape::kK>, Operand::kA, ElementA, LayoutA,
      MatrixShape<ArchMmaOperator::Shape::kM, ArchMmaOperator::Shape::kK>,
      Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
@@ -241,7 +241,7 @@ public:
       Array<typename ArchMmaOperator::ElementA, FragmentA::kElements>;
 
   /// Iterates over the B operand in memory
-  using IteratorB = QuantBMmaTensorOpMultiplicandTileIterator<
+  using IteratorB = MmaTensorOpMultiplicandTileIterator<
       MatrixShape<Shape::kK/2, Shape::kN/2>, Operand::kB, ElementB, LayoutB,
       MatrixShape<ArchMmaOperator::Shape::kK/2, ArchMmaOperator::Shape::kN/2>,
       Policy::OpDelta::kRow, kThreadCount, kPartitionsK>;
