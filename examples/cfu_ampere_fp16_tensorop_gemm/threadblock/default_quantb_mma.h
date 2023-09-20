@@ -75,8 +75,6 @@ template <
     typename LayoutQScale_,
     /// Blocking size for quantization
     typename QuantBlocking_,
-    /// Access granularity of quant scales in units of elements
-    int kAlignmentQ_,
     /// Element type for internal accumulation
     typename ElementAccumulator_,
     /// Layout type for C and D matrix operands
@@ -133,8 +131,6 @@ template <
     typename LayoutQScale,
     /// Blocking size for quantization
     typename QuantBlocking,
-    /// Access granularity of quant scales in units of elements
-    int kAlignmentQ,
     /// Element type for internal accumulation
     typename ElementAccumulator,
     /// Layout type for C and D matrix operand
@@ -163,7 +159,7 @@ template <
     typename PermuteBLayout
     >
 struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
-                  kAlignmentB, ElementQScale, LayoutQScale, QuantBlocking, kAlignmentQ,
+                  kAlignmentB, ElementQScale, LayoutQScale, QuantBlocking,
                   ElementAccumulator, LayoutC,
                   arch::OpClassTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, Stages, Operator, false, SharedMemoryClear,

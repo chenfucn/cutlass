@@ -180,7 +180,7 @@ using ElementW = uint8_t;                           // <- Weight is int4, uint8 
 using ElementWPack = cutlass::half_t;
 using LayoutInputWPack = cutlass::layout::ColumnMajor;  // <- layout of packed weight, must be column major
 using ElementQScale = cutlass::half_t;              // <- data type of quantization scale
-using QuantBlocking = cutlass::MatrixShape<32,1>;   // <- weights block per scale (1,16/32/64), (16/32/64,1)
+using QuantBlocking = cutlass::MatrixShape<1,32>;   // <- weights block per scale (1,16/32/64), (16/32/64,1)
 using LayoutInputQScale = 
     std::conditional<QuantBlocking::kRow == 1,
         cutlass::layout::ColumnMajor,

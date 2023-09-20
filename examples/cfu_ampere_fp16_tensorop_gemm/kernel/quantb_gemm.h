@@ -67,6 +67,8 @@ struct QuantBGemm {
   using ThreadblockSwizzle = ThreadblockSwizzle_;
   static bool const kSplitKSerial = SplitKSerial;
 
+  static constexpr int kAlignmentQ = Mma::ThreadMapQScale::kElementsPerAccess;
+
   /// Warp count (concept: GemmShape)
   using WarpCount = typename Mma::WarpCount;
   static int const kThreadCount = 32 * WarpCount::kCount;

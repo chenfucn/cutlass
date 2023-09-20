@@ -274,7 +274,6 @@ class QuantBGemm {
   using ElementQScale = ElementQScale_;
   using LayoutQScale = LayoutQScale_;
   using QuantBlocking = QuantBlocking_;
-  static int const kAlignmentQ = 128 / sizeof_bits<ElementQScale>::value;
 
   /// Define the kernel
   using GemmKernel = typename kernel::DefaultQuantBGemm<
@@ -287,7 +286,6 @@ class QuantBGemm {
     ElementQScale,
     LayoutQScale,
     QuantBlocking,
-    kAlignmentQ,
     ElementC,
     LayoutC,
     ElementAccumulator,
