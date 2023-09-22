@@ -213,14 +213,6 @@ private:
 
   TensorCoord lane_position_;
 
-  /// Stride quantity
-  StrideIndex stride_;
-
-  // Debug
-  int thread_idx_;
-  int warp_idx_;
-  int lane_idx_;
-
 public:
 
   CUTLASS_DEVICE
@@ -235,11 +227,7 @@ public:
   ): 
     pointer_(ref.data()),
     layout_(ref.layout()),
-    lane_position_(MetaTile::lane_position(lane_idx)),
-    stride_(ref.stride()[0]),
-    thread_idx_(thread_idx),
-    warp_idx_(warp_idx),
-    lane_idx_(lane_idx)
+    lane_position_(MetaTile::lane_position(lane_idx))
      {}
 
   /// Loads a fragment
@@ -284,12 +272,6 @@ public:
 
   CUTLASS_HOST_DEVICE
   static void dequant(Fragment const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<Element, kExpandedSize>& dest){
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < kExpandedSize/2; ++i) {
-      dest[i * 2] = static_cast<Element>(int(weights[i] & 0x0f) - 8);
-      dest[i * 2 + 1] = static_cast<Element>(int(weights[i] >> 4) - 8);
-    }
-
     static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm now.");
 
     int out_idx = 0;
@@ -421,14 +403,6 @@ private:
 
   TensorCoord lane_position_;
 
-  /// Stride quantity
-  StrideIndex stride_;
-
-  // Debug
-  int thread_idx_;
-  int warp_idx_;
-  int lane_idx_;
-
 public:
 
   CUTLASS_DEVICE
@@ -443,11 +417,7 @@ public:
   ): 
     pointer_(ref.data()),
     layout_(ref.layout()),
-    lane_position_(MetaTile::lane_position(lane_idx)),
-    stride_(ref.stride()[0]),
-    thread_idx_(thread_idx),
-    warp_idx_(warp_idx),
-    lane_idx_(lane_idx)
+    lane_position_(MetaTile::lane_position(lane_idx))
      {}
 
   /// Loads a fragment
@@ -491,12 +461,6 @@ public:
 
   CUTLASS_HOST_DEVICE
   static void dequant(Fragment const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<Element, kExpandedSize>& dest){
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < kExpandedSize/2; ++i) {
-      dest[i * 2] = static_cast<Element>(int(weights[i] & 0x0f) - 8);
-      dest[i * 2 + 1] = static_cast<Element>(int(weights[i] >> 4) - 8);
-    }
-
     static_assert(kNRepeats == 1, "This is implied by BlockingShape::kColumn == 1");
     static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm now.");
 
