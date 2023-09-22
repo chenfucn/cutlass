@@ -177,7 +177,9 @@ template <
     typename LayoutB_,
     /// Element type for quant scales
     typename ElementQScale_,
-    /// Layout type for quant scales
+    /// Element type for quant offsets
+    typename ElementQOffset_,
+    /// Layout type for quant scales and offsets
     typename LayoutQScale_,
     /// Blocking dimensions for quantization
     typename QuantBlocking_,
@@ -272,8 +274,13 @@ class QuantBGemm {
   static_assert(InstructionShape::kK == 16,
                 "InstructionShape::kK must be a multiple of 16 (2 tiles), required by 4b weight packing layout.");
   using ElementQScale = ElementQScale_;
+  using ElementQOffset = ElementQOffset_;
   using LayoutQScale = LayoutQScale_;
   using QuantBlocking = QuantBlocking_;
+  static constexpr bool kHasQOffset = !(std::is_same<ElementQOffset, std::monostate>::value);
+
+  // TODO enable uint4_t or smaller for QOffset 
+  static_assert(!kHasQOffset || std::is_same<ElementQOffset_, uint8_t>::value, "QOffset must be uint8_t");
 
   /// Define the kernel
   using GemmKernel = typename kernel::DefaultQuantBGemm<
@@ -284,6 +291,7 @@ class QuantBGemm {
     LayoutB,
     kAlignmentB,
     ElementQScale,
+    ElementQOffset,
     LayoutQScale,
     QuantBlocking,
     ElementC,
@@ -319,6 +327,7 @@ class QuantBGemm {
     TensorRef<ElementC const, LayoutC> ref_C;
     TensorRef<ElementC, LayoutC> ref_D;
     TensorRef<ElementQScale const, LayoutQScale> ref_Qscale;
+    TensorRef<ElementQOffset const, LayoutQScale> ref_Qoffset;
 
     typename EpilogueOutputOp::Params epilogue;
     int split_k_slices;
@@ -364,7 +373,38 @@ class QuantBGemm {
       gather_A_indices(gather_A_indices_),
       gather_B_indices(gather_B_indices_),
       scatter_D_indices(scatter_D_indices_) {
+        assert(!kHasQOffset);
+    }
 
+    CUTLASS_HOST_DEVICE
+    Arguments(
+      GemmCoord problem_size_,
+      TensorRef<ElementA const, LayoutA> ref_A_,
+      TensorRef<ElementB const, LayoutB> ref_B_,
+      TensorRef<ElementQScale const, LayoutQScale> ref_Qscale_,
+      TensorRef<ElementQOffset const, LayoutQScale> ref_Qoffset_,
+      TensorRef<ElementC const, LayoutC> ref_C_,
+      TensorRef<ElementC, LayoutC> ref_D_,
+      typename EpilogueOutputOp::Params epilogue_ = 
+        typename EpilogueOutputOp::Params(),
+      int split_k_slices = 1,
+      int const *gather_A_indices_ = nullptr,
+      int const *gather_B_indices_ = nullptr,
+      int const *scatter_D_indices_ = nullptr
+    ):
+      problem_size(problem_size_),
+      ref_A(ref_A_),
+      ref_B(ref_B_),
+      ref_Qscale(ref_Qscale_),
+      ref_Qoffset(ref_Qoffset_),
+      ref_C(ref_C_),
+      ref_D(ref_D_),
+      epilogue(epilogue_),
+      split_k_slices(split_k_slices),
+      gather_A_indices(gather_A_indices_),
+      gather_B_indices(gather_B_indices_),
+      scatter_D_indices(scatter_D_indices_) {
+        assert(kHasQOffset);
     }
   };
 
@@ -390,6 +430,7 @@ public:
       args.ref_A.non_const_ref(),
       args.ref_B.non_const_ref(),
       args.ref_Qscale.non_const_ref(),
+      args.ref_Qoffset.non_const_ref(),
       args.ref_C.non_const_ref(),
       args.ref_D
     );
@@ -462,6 +503,7 @@ public:
       args.ref_A.non_const_ref(),
       args.ref_B.non_const_ref(),
       args.ref_Qscale.non_const_ref(),
+      args.ref_Qoffset.non_const_ref(),
       args.ref_C.non_const_ref(),
       args.ref_D,
       args.epilogue,
@@ -486,6 +528,7 @@ public:
     params_.ref_A.reset(args.ref_A.non_const_ref().data());
     params_.ref_B.reset(args.ref_B.non_const_ref().data());
     params_.ref_Qscale.reset(args.ref_Qscale.non_const_ref().data());
+    params_.ref_Qoffset.reset(args.ref_Qoffset.non_const_ref().data());
     params_.ref_C.reset(args.ref_C.non_const_ref().data());
     params_.ref_D.reset(args.ref_D.data());
     params_.output_op = args.epilogue;

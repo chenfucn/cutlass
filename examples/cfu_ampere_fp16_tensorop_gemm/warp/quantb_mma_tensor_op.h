@@ -156,6 +156,10 @@ template <
   typename ElementQScale_,
   /// Layout of quant scales (concept: MatrixLayout)
   typename SmemLayoutQScale_,
+  /// Data type of quant offsets
+  typename ElementQOffset_,
+  /// Layout of quant offsets (concept: MatrixLayout)
+  typename SmemLayoutQOffset_,
   /// Blocking dimensions of quantization
   typename QuantBlocking_,
   /// Element type of C matrix
@@ -274,6 +278,9 @@ public:
   using SmemLayoutQScale = SmemLayoutQScale_;
   using QuantBlocking = QuantBlocking_;
 
+  using ElementQOffset = ElementQOffset_;
+  using SmemLayoutQOffset = SmemLayoutQOffset_;
+
   /// Iterates over the quantization parameters in memory
   using WarpQScaleShape = MatrixShape<(Shape::kK / QuantBlocking::kRow), (Shape::kN / QuantBlocking::kColumn)>;
   static_assert(Shape::kK % QuantBlocking::kRow == 0, "K must be multiple of QuantBlocking::kRow");
@@ -284,9 +291,11 @@ public:
   // to all threads in the warp.
   using IteratorQScale = QuantBMetaMmaTensorOpTileIterator<
     MatrixShape<Shape::kK, Shape::kN>, QuantBlocking, ElementQScale, SmemLayoutQScale,
+    ElementQOffset, SmemLayoutQOffset,
     ArchMmaOperator, kThreadCount, kPartitionsK>;
 
-  using FragmentQScale = typename IteratorQScale::Fragment;
+  using FragmentQScale = typename IteratorQScale::FragmentScale;
+  using FragmentQOffset = typename IteratorQScale::FragmentOffset;
 
   /// Number of mma operations performed
   using MmaIterations = MatrixShape<

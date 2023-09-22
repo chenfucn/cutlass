@@ -129,10 +129,14 @@ template <
   /// Block dimensions of the blockwise quantization. So the actual meta data
   /// warp shape is WarpShapeB_ / BlockingShape_
   typename BlockingShape_,
-  /// Data type of the meta data elements
-  typename Element_,
-  /// Layout of meta data tensor
-  typename Layout_,
+  /// Data type of the quant scales
+  typename ElementScale_,
+  /// Layout of the quant scales
+  typename LayoutScale_,
+  /// Data type of quant offsets
+  typename ElementOffset_,
+  /// Layout of quant offsets
+  typename LayoutOffset_,
   /// Underlying matrix multiply operator (concept: arch::Mma)
   typename ArchMmaOperator_,
   /// Number of threads participating in one matrix operation
@@ -152,21 +156,27 @@ template <
   /// warp shape is WarpShapeB_ / BlockingShape_
   typename BlockingShape_,
   /// Data type of the meta data elements
-  typename Element_,
+  typename ElementScale_,
+  /// Data type of quant offsets
+  typename ElementOffset_,
   /// Underlying matrix multiply operator (concept: arch::Mma)
   typename ArchMmaOperator_,
   /// Number of threads participating in one matrix operation
   int Threads>
 class QuantBMetaMmaTensorOpTileIterator<WarpShapeB_, BlockingShape_,
-    Element_, cutlass::layout::ColumnMajor, ArchMmaOperator_,
-    Threads, 1>{
+    ElementScale_, cutlass::layout::ColumnMajor,
+    ElementOffset_, cutlass::layout::ColumnMajor,
+    ArchMmaOperator_, Threads, 1>{
 public:
 
   using WarpShapeB = WarpShapeB_;
   using BlockingShape = BlockingShape_;
-  using Element = Element_;
+  using ElementScale = ElementScale_;
   using Layout = cutlass::layout::ColumnMajor;
+  using ElementOffset = ElementOffset_;
   using ArchMmaOperator = ArchMmaOperator_;
+
+  static constexpr bool kHasOffset = !(std::is_same<ElementOffset, std::monostate>::value);
 
   using MetaTile = QuantBMetaMmaTile<WarpShapeB, BlockingShape, ArchMmaOperator, Threads>;
 
@@ -195,21 +205,27 @@ public:
   static constexpr int kNRepeats = MetaTile::kNRepeats;
   static constexpr int kMmaIterations = MetaTile::kMmaIterations;
 
-  using TensorRef = TensorRef<Element, Layout>;
+  using TensorRefScale = TensorRef<ElementScale, Layout>;
+  using TensorRefOffset = TensorRef<ElementOffset, Layout>;
   using TensorCoord = typename Layout::TensorCoord;
 
   using Index = typename Layout::Index;
   using LongIndex = typename Layout::LongIndex;
   using StrideIndex = typename Layout::Stride::Index;
-  using Fragment = Array<Element, MetaTile::kFragementSize>;
 
-  using AccessType = Array<Element, kCoreTileFragementSize>;
+  using FragmentScale = Array<ElementScale, MetaTile::kFragementSize>;
+  using FragmentOffset = Array<ElementOffset, MetaTile::kFragementSize>;
+
+  using AccessTypeScale = Array<ElementScale, kCoreTileFragementSize>;
+  using AccessTypeOffset = Array<ElementOffset, kCoreTileFragementSize>;
 
 private:
 
-  Element *pointer_;
-
+  ElementScale *pointer_;
   Layout layout_;
+
+  ElementOffset *pointer_offset_;
+  Layout layout_offset_;
 
   TensorCoord lane_position_;
 
@@ -220,28 +236,47 @@ public:
 
   CUTLASS_DEVICE
   QuantBMetaMmaTensorOpTileIterator(
-    TensorRef const &ref, 
+    TensorRefScale const &ref, 
     int thread_idx,
     int warp_idx,
     int lane_idx
   ): 
     pointer_(ref.data()),
     layout_(ref.layout()),
-    lane_position_(MetaTile::lane_position(lane_idx))
-     {}
+    lane_position_(MetaTile::lane_position(lane_idx)),
+    pointer_offset_(nullptr),
+    layout_offset_() {
+//      assert(kHasOffset == false);
+  }
+
+  CUTLASS_DEVICE
+  QuantBMetaMmaTensorOpTileIterator(
+    TensorRefScale const &ref,
+    TensorRefOffset const &ref_offset,
+    int thread_idx,
+    int warp_idx,
+    int lane_idx
+  ): 
+    pointer_(ref.data()),
+    layout_(ref.layout()),
+    lane_position_(MetaTile::lane_position(lane_idx)),
+    pointer_offset_(ref_offset.data()),
+    layout_offset_(ref.layout()) {
+      assert(kHasOffset == false);
+  }
 
   /// Loads a fragment
   CUTLASS_HOST_DEVICE
-  void load(Fragment &frag) {
+  void load(FragmentScale &frag) {
     int row = lane_position_.row() / BlockingShape::kRow;
     int column = lane_position_.column() / BlockingShape::kColumn;
 
-    AccessType* dst_ptr = reinterpret_cast<AccessType*>(frag.data());
+    AccessTypeScale* dst_ptr = reinterpret_cast<AccessTypeScale*>(frag.data());
     CUTLASS_PRAGMA_UNROLL
     for (int n_idx = 0, c = column; n_idx < kMmaIterations; n_idx++, c += kNStride){
       CUTLASS_PRAGMA_UNROLL
       for (int mma_tile_idx = 0, r = row; mma_tile_idx < kTilesPerMma; mma_tile_idx++, r += kKTileStride){
-        AccessType* src_ptr = reinterpret_cast<AccessType*>(pointer_ + layout_({r, c}));
+        AccessTypeScale* src_ptr = reinterpret_cast<AccessTypeScale*>(pointer_ + layout_({r, c}));
         *dst_ptr = *src_ptr;
         dst_ptr++;
       }
@@ -249,8 +284,8 @@ public:
   }
 
   CUTLASS_HOST_DEVICE
-  static Array<Element, kExpandedSize> debug_expand(Fragment const &frag){
-    Array<Element, kExpandedSize> ret;
+  static Array<ElementScale, kExpandedSize> debug_expand(FragmentScale const &frag){
+    Array<ElementScale, kExpandedSize> ret;
     int out_idx = 0;
     CUTLASS_PRAGMA_UNROLL
     for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
@@ -271,7 +306,7 @@ public:
   }
 
   CUTLASS_HOST_DEVICE
-  static void dequant(Fragment const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<Element, kExpandedSize>& dest){
+  static void dequant(FragmentScale const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<ElementScale, kExpandedSize>& dest){
     static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm now.");
 
     int out_idx = 0;
@@ -288,13 +323,13 @@ public:
 
         int w1 = weights[out_idx/2] & 0x0f;
         int w2 = weights[out_idx/2] >> 4;
-        Element s = scales[idx];
-        dest[out_idx] = Element(s * (w1 - 8));
+        ElementScale s = scales[idx];
+        dest[out_idx] = ElementScale(s * (w1 - 8));
         if constexpr (BlockingShape::kRow == 1){
           s = scales[idx+1];
         }
         out_idx++;
-        dest[out_idx] = Element(s * (w2 - 8));
+        dest[out_idx] = ElementScale(s * (w2 - 8));
         out_idx++;
       }
     }
@@ -339,21 +374,27 @@ template <
   /// warp shape is WarpShapeB_ / BlockingShape_
   typename BlockingShape_,
   /// Data type of the meta data elements
-  typename Element_,
+  typename ElementScale_,
+  /// Data type of quant offsets
+  typename ElementOffset_,
   /// Underlying matrix multiply operator (concept: arch::Mma)
   typename ArchMmaOperator_,
   /// Number of threads participating in one matrix operation
   int Threads>
 class QuantBMetaMmaTensorOpTileIterator<WarpShapeB_, BlockingShape_,
-    Element_, cutlass::layout::RowMajor, ArchMmaOperator_,
-    Threads, 1>{
+    ElementScale_, cutlass::layout::RowMajor,
+    ElementOffset_, cutlass::layout::RowMajor,
+    ArchMmaOperator_, Threads, 1>{
 public:
 
   using WarpShapeB = WarpShapeB_;
   using BlockingShape = BlockingShape_;
-  using Element = Element_;
+  using ElementScale = ElementScale_;
+  using ElementOffset = ElementOffset_;
   using Layout = cutlass::layout::RowMajor;
   using ArchMmaOperator = ArchMmaOperator_;
+
+  static constexpr bool kHasOffset = !(std::is_same<ElementOffset, std::monostate>::value);
 
   static_assert(BlockingShape::kColumn == 1 && BlockingShape::kRow > 1,
           "Only support column blocking for row major layout");
@@ -385,19 +426,20 @@ public:
   static constexpr int kNRepeats = MetaTile::kNRepeats;
   static constexpr int kMmaIterations = MetaTile::kMmaIterations;
 
-  using TensorRef = TensorRef<Element, Layout>;
+  using TensorRefScale = TensorRef<ElementScale, Layout>;
+  using TensorRefOffset = TensorRef<ElementOffset, Layout>;
   using TensorCoord = typename Layout::TensorCoord;
 
   using Index = typename Layout::Index;
   using LongIndex = typename Layout::LongIndex;
   using StrideIndex = typename Layout::Stride::Index;
-  using Fragment = Array<Element, MetaTile::kFragementSize>;
 
-//  using AccessType = Array<Element, kMmaIterations>;
+  using FragmentScale = Array<ElementScale, MetaTile::kFragementSize>;
+  using FragmentOffset = Array<ElementOffset, MetaTile::kFragementSize>;
 
 private:
 
-  Element *pointer_;
+  ElementScale *pointer_;
 
   Layout layout_;
 
@@ -410,7 +452,7 @@ public:
 
   CUTLASS_DEVICE
   QuantBMetaMmaTensorOpTileIterator(
-    TensorRef const &ref, 
+    TensorRefScale const &ref, 
     int thread_idx,
     int warp_idx,
     int lane_idx
@@ -422,13 +464,13 @@ public:
 
   /// Loads a fragment
   CUTLASS_HOST_DEVICE
-  void load(Fragment &frag) {
+  void load(FragmentScale &frag) {
     int row = lane_position_.row() / BlockingShape::kRow;
     int column = lane_position_.column() / BlockingShape::kColumn;
     static_assert(kTilesPerMma * kCoreTileFragementSize == 1, "Only support one meta data per core tile");
 
-    Element* src_ptr = reinterpret_cast<Element*>(pointer_ + layout_({row, column}));
-    Element* dst_ptr = reinterpret_cast<Element*>(frag.data());
+    ElementScale* src_ptr = reinterpret_cast<ElementScale*>(pointer_ + layout_({row, column}));
+    ElementScale* dst_ptr = reinterpret_cast<ElementScale*>(frag.data());
     CUTLASS_PRAGMA_UNROLL
     for (int n_idx = 0; n_idx < kMmaIterations; n_idx++){
       dst_ptr[n_idx] = src_ptr[n_idx * kNStride];
@@ -436,8 +478,8 @@ public:
   }
 
   CUTLASS_HOST_DEVICE
-  static Array<Element, kExpandedSize> debug_expand(Fragment const &frag){
-    Array<Element, kExpandedSize> ret;
+  static Array<ElementScale, kExpandedSize> debug_expand(FragmentScale const &frag){
+    Array<ElementScale, kExpandedSize> ret;
 
     int out_idx = 0;
     CUTLASS_PRAGMA_UNROLL
@@ -460,22 +502,22 @@ public:
   }
 
   CUTLASS_HOST_DEVICE
-  static void dequant(Fragment const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<Element, kExpandedSize>& dest){
+  static void dequant(FragmentScale const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<ElementScale, kExpandedSize>& dest){
     static_assert(kNRepeats == 1, "This is implied by BlockingShape::kColumn == 1");
     static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm now.");
 
     int out_idx = 0;
     CUTLASS_PRAGMA_UNROLL
     for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
-      Element s = scales[n_out];
+      ElementScale s = scales[n_out];
       CUTLASS_PRAGMA_UNROLL
       for (int mma_tile_out_idx = 0; mma_tile_out_idx < kBTilesPerMma; mma_tile_out_idx++){
         // We take advantage of the fact that kNumBsPerCoreTileFragement == 2 to extract
         // 2 int4 weights out of a bytes. Valid for all 16b GEMM.
         int w1 = weights[out_idx/2] & 0x0f;
         int w2 = weights[out_idx/2] >> 4;
-        dest[out_idx] = Element(s * (w1 - 8));
-        dest[out_idx + 1] = Element(s * (w2 - 8));
+        dest[out_idx] = ElementScale(s * (w1 - 8));
+        dest[out_idx + 1] = ElementScale(s * (w2 - 8));
         out_idx += 2;
       }
     }

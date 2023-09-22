@@ -67,7 +67,7 @@ struct QuantBGemm {
   using ThreadblockSwizzle = ThreadblockSwizzle_;
   static bool const kSplitKSerial = SplitKSerial;
 
-  static constexpr int kAlignmentQ = Mma::ThreadMapQScale::kElementsPerAccess;
+  static constexpr bool kHasQOffset = Mma::kHasQOffset;
 
   /// Warp count (concept: GemmShape)
   using WarpCount = typename Mma::WarpCount;
@@ -84,6 +84,8 @@ struct QuantBGemm {
     typename Mma::IteratorB::TensorRef ref_B;
     typename Mma::IteratorQScale::Params params_QScale;
     typename Mma::IteratorQScale::TensorRef ref_QScale;
+    typename Mma::IteratorQOffset::Params params_QOffset;
+    typename Mma::IteratorQOffset::TensorRef ref_QOffset;
     typename Epilogue::OutputTileIterator::Params params_C;
     typename Epilogue::OutputTileIterator::TensorRef ref_C;
     typename Epilogue::OutputTileIterator::Params params_D;
@@ -110,6 +112,7 @@ struct QuantBGemm {
       typename Mma::IteratorA::TensorRef ref_A,
       typename Mma::IteratorB::TensorRef ref_B,
       typename Mma::IteratorQScale::TensorRef ref_QScale,
+      typename Mma::IteratorQOffset::TensorRef ref_QOffset,
       typename Epilogue::OutputTileIterator::TensorRef ref_C,
       typename Epilogue::OutputTileIterator::TensorRef ref_D,
       typename OutputOp::Params output_op = typename OutputOp::Params(),
@@ -127,6 +130,8 @@ struct QuantBGemm {
       ref_B(ref_B),
       params_QScale(ref_QScale.layout()),
       ref_QScale(ref_QScale),
+      params_QOffset(ref_QOffset.layout()),
+      ref_QOffset(ref_QOffset),
       params_C(ref_C.layout()),
       ref_C(ref_C),
       params_D(ref_D.layout()),
@@ -135,7 +140,6 @@ struct QuantBGemm {
       gather_A_indices(gather_A_indices),
       gather_B_indices(gather_B_indices),
       scatter_D_indices(scatter_D_indices) {
-
       int total_gemm_k_iterations = (problem_size.k() + Mma::Shape::kK - 1) / Mma::Shape::kK;
       int gemm_k_iterations = (total_gemm_k_iterations + grid_tiled_shape.k() - 1) / grid_tiled_shape.k();
       
@@ -165,6 +169,7 @@ struct QuantBGemm {
     typename Mma::IteratorA::TensorRef ref_A,
     typename Mma::IteratorB::TensorRef ref_B,
     typename Mma::IteratorQScale::TensorRef ref_QScale,
+    typename Mma::IteratorQOffset::TensorRef ref_QOffset,
     typename Epilogue::OutputTileIterator::TensorRef ref_C,
     typename Epilogue::OutputTileIterator::TensorRef ref_D) {
 
@@ -213,6 +218,10 @@ struct QuantBGemm {
     }
 
     if (!TensorRef_aligned(ref_QScale, Mma::IteratorQScale::AccessType::kElements)) {
+      return Status::kErrorMisalignedOperand;
+    }
+
+    if (kHasQOffset && !TensorRef_aligned(ref_QOffset, Mma::IteratorQOffset::AccessType::kElements)) {
       return Status::kErrorMisalignedOperand;
     }
 
@@ -309,7 +318,14 @@ struct QuantBGemm {
       {qscale_k, qscale_n},
       thread_idx,
       tb_offset_QScale,
-      params.gather_B_indices);
+      nullptr);
+
+    typename Mma::IteratorQOffset iterator_QOffset(
+      params.params_QOffset,
+      params.ref_QOffset.data(),
+      {qscale_k, qscale_n},
+      thread_idx,
+      tb_offset_QScale);
 
     // Broadcast the warp_id computed by lane 0 to ensure dependent code
     // is compiled as warp-uniform.
@@ -329,7 +345,7 @@ struct QuantBGemm {
 
     if (!kSplitKSerial || gemm_k_iterations > 0) {
       // Compute threadblock-scoped matrix multiply-add
-      mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_QScale, accumulators);
+      mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_QScale, iterator_QOffset, accumulators);
     }
 
     //

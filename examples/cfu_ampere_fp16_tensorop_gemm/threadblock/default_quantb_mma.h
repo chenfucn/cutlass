@@ -43,6 +43,7 @@
 #include "cutlass/layout/permute.h"
 #include "cutlass/transform/threadblock/predicated_tile_iterator.h"
 #include "cutlass/transform/threadblock/predicated_tile_iterator_2dthreadtile.h"
+#include "threadblock/optional_predicated_tile_access_iter.h"
 
 #include "cutlass/gemm/gemm.h"
 #include "threadblock/default_quantb_mma_core.h"
@@ -71,7 +72,9 @@ template <
     int kAlignmentB,
     /// Element type for quant scales
     typename ElementQScale_,
-    /// Layout for quant scales
+    /// Element type for quant offsets
+    typename ElementQOffset_,
+    /// Layout for quant scales and offsets
     typename LayoutQScale_,
     /// Blocking size for quantization
     typename QuantBlocking_,
@@ -127,7 +130,9 @@ template <
     int kAlignmentB,
     /// Element type for quant scales
     typename ElementQScale,
-    /// Layout for quant scales
+    /// Element type for quant offsets
+    typename ElementQOffset,
+    /// Layout for quant scales and offsets
     typename LayoutQScale,
     /// Blocking size for quantization
     typename QuantBlocking,
@@ -159,7 +164,8 @@ template <
     typename PermuteBLayout
     >
 struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
-                  kAlignmentB, ElementQScale, LayoutQScale, QuantBlocking,
+                  kAlignmentB, ElementQScale, ElementQOffset,
+                  LayoutQScale, QuantBlocking,
                   ElementAccumulator, LayoutC,
                   arch::OpClassTensorOp, ArchTag, ThreadblockShape, WarpShape,
                   InstructionShape, Stages, Operator, false, SharedMemoryClear,
@@ -182,7 +188,7 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
   // Define the MmaCore components
   using MmaCore = typename cutlass::gemm::threadblock::DefaultQuantBMmaCore<
       ThreadblockShape, WarpShape, InstructionShape, ElementA, LayoutA,
-      ElementB, LayoutB, ElementQScale, LayoutQScale, QuantBlocking,
+      ElementB, LayoutB, ElementQScale, ElementQOffset, LayoutQScale, QuantBlocking,
       ElementAccumulator, LayoutC, arch::OpClassTensorOp,
       Stages, Operator, false, CacheOpA, CacheOpB>;
 
@@ -208,14 +214,24 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
       cutlass::Array<ElementQScale, ThreadMapQScale::kElementsPerAccess>;
   using IteratorQScale =
       cutlass::transform::threadblock::PredicatedTileAccessIterator<
-          typename MmaCore::ThreadblockQScaleShape,
+          typename MmaCore::ThreadblockQShape,
           ElementQScale, LayoutQScale, 0, ThreadMapQScale, AccessTypeQScale>;
+
+  using ThreadMapQOffset = typename MmaCore::IteratorThreadMapQOffset;
+  using AccessTypeQOffset =
+      cutlass::Array<ElementQOffset, ThreadMapQOffset::kElementsPerAccess>;
+  using IteratorQOffset =
+      cutlass::transform::threadblock::OptionalPredicatedTileAccessIterator<
+            typename MmaCore::ThreadblockQShape, ElementQOffset, LayoutQScale,
+            0, ThreadMapQOffset, AccessTypeQOffset, MmaCore::kThreads>;
 
   // Define the threadblock-scoped multistage matrix multiply
   using ThreadblockMma = cutlass::gemm::threadblock::QuantBMmaMultistage<
       typename MmaCore::Shape, IteratorA, typename MmaCore::SmemIteratorA,
       MmaCore::kCacheOpA, IteratorB, typename MmaCore::SmemIteratorB,
-      MmaCore::kCacheOpB, IteratorQScale, typename MmaCore::SmemIteratorQScale, MmaCore::kCacheOpQScale,
+      MmaCore::kCacheOpB, IteratorQScale, typename MmaCore::SmemIteratorQScale,
+      cutlass::arch::CacheOperation::Global, IteratorQOffset,
+      typename MmaCore::SmemIteratorQOffset, cutlass::arch::CacheOperation::Global,
       ElementAccumulator, LayoutC,
       typename MmaCore::MmaPolicy, Stages, SharedMemoryClear>;
 };

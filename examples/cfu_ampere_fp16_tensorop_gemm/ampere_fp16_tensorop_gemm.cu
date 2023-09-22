@@ -46,6 +46,7 @@ fp32 data by using NVIDIA Ampere architecture.
 */
 
 #include <iostream>
+#include <variant>
 
 #include "cutlass/cutlass.h"
 #include "device/quantb_gemm.h"
@@ -101,7 +102,7 @@ struct Options {
   
   Options():
     help(false),
-    problem_size({128, 256, 1024}),
+    problem_size({32, 256, 512}),
     batch_count(1),
     reference_check(true),
     iterations(20),
@@ -180,6 +181,7 @@ using ElementW = uint8_t;                           // <- Weight is int4, uint8 
 using ElementWPack = cutlass::half_t;
 using LayoutInputWPack = cutlass::layout::ColumnMajor;  // <- layout of packed weight, must be column major
 using ElementQScale = cutlass::half_t;              // <- data type of quantization scale
+using ElementQOffset = uint8_t;                     // <- data type of quantization offset
 using QuantBlocking = cutlass::MatrixShape<1,32>;   // <- weights block per scale (1,16/32/64), (16/32/64,1)
 using LayoutInputQScale = 
     std::conditional<QuantBlocking::kRow == 1,
@@ -227,6 +229,7 @@ using Gemm = cutlass::gemm::device::QuantBGemm<ElementInputA,
                                          ElementInputB,
                                          LayoutInputB,
                                          ElementQScale,
+                                         ElementQOffset, // std::monostate,  // <- no quantization offset
                                          LayoutInputQScale,
                                          QuantBlocking,
                                          ElementOutput,
@@ -256,8 +259,10 @@ int run(Options &options) {
   // into one int8
   cutlass::HostTensor<ElementW, LayoutInputB> tensor_weight(
       {problem_size.k()/2, problem_size.n()});
-  // Create weight quantization scale with dimensions K x N
+  // Create weight quantization scale and offset with dimensions K x N
   cutlass::HostTensor<ElementQScale, LayoutInputQScale> tensor_scale(
+      {problem_size.k()/QuantBlocking::kRow, problem_size.n()/QuantBlocking::kColumn});
+  cutlass::HostTensor<ElementQOffset, LayoutInputQScale> tensor_offset(
       {problem_size.k()/QuantBlocking::kRow, problem_size.n()/QuantBlocking::kColumn});
 
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(
@@ -286,6 +291,12 @@ int run(Options &options) {
       ElementQScale(-1.5),
       3);  // <- Fill weight scales on host with uniform-distribution random data
   cutlass::reference::host::TensorFillRandomUniform(
+      tensor_offset.host_view(),
+      1,
+      ElementQOffset(0),
+      ElementQOffset(15),
+      0);  // <- Fill weight offsets on host with uniform-distribution random data
+  cutlass::reference::host::TensorFillRandomUniform(
       tensor_c.host_view(),
       1,
       ElementOutput(4),
@@ -294,26 +305,32 @@ int run(Options &options) {
   cutlass::reference::host::TensorFill(
       tensor_d.host_view());  // <- fill matrix D on host with zeros
 
-  // // Fill tensor_weight with the patterned data, so that we can use
-  // // print to make sure the layout matches after loaded to registers
-  // int loop_val = 0;
-  // int offset = 3;
-  // for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
-  //   for (int row_tile = 0; row_tile < tensor_weight.extent().row()/4; ++row_tile) {
-  //     for (int col = 0; col < 8; ++col) {
-  //       for (int row = 0; row < 4; ++row) {
-  //         auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
-  //         auto val = (loop_val + offset) % 256;
-  //         tensor_weight.at(weight_cord) = ElementW(val);
-  //         loop_val++;
-  //         if (loop_val == 256) {
-  //           loop_val = 0;
-  //           offset += 5;
-  //         }
-  //       }
-  //     }
-  //   }
-  // }
+  // Fill tensor_weight with the patterned data, so that we can use
+  // print to make sure the layout matches after loaded to registers
+  int loop_val = 0;
+  int offset = 3;
+  for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
+    for (int row_tile = 0; row_tile < tensor_weight.extent().row()/4; ++row_tile) {
+      for (int col = 0; col < 8; ++col) {
+        for (int row = 0; row < 4; ++row) {
+          auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
+          auto val = (loop_val + offset) % 256;
+          tensor_weight.at(weight_cord) = ElementW(val);
+          loop_val++;
+          if (loop_val == 256) {
+            loop_val = 0;
+            offset += 5;
+          }
+        }
+      }
+    }
+  }
+  for (int col = 0; col < tensor_scale.extent().column(); ++col){
+    for (int row = 0; row < tensor_scale.extent().row(); ++row){
+      tensor_scale.at({row, col}) = tensor_weight.at({row * QuantBlocking::kRow, col * QuantBlocking::kColumn});
+      tensor_offset.at({row, col}) = tensor_weight.at({row * QuantBlocking::kRow, col * QuantBlocking::kColumn});
+    }
+  }
 
   // int fill_val = -512;
   // int factor = 1;
@@ -332,7 +349,7 @@ int run(Options &options) {
   std::cout << "================== Matrix Scale ==========================\n";
   for (int row = 0; row < tensor_scale.extent().row(); ++row){
     for (int col = 0; col < tensor_scale.extent().column(); ++col){
-      printf("%.3f, ", float(tensor_scale.at({row, col})));
+      printf("%.0f, ", float(tensor_scale.at({row, col})));
     }
     printf("\n");
   }
@@ -395,6 +412,7 @@ int run(Options &options) {
   tensor_a.sync_device();
   tensor_weight_prepacked.sync_device();
   tensor_scale.sync_device();
+  tensor_offset.sync_device();
   tensor_c.sync_device();
   tensor_d.sync_device();
   cutlass::TensorRef<ElementWPack const, LayoutInputWPack> ref_W(
@@ -413,7 +431,8 @@ int run(Options &options) {
   typename Gemm::Arguments arguments{problem_size,  // <- problem size of matrix multiplication
                                      tensor_a.device_ref(),  // <- reference to matrix A on device
                                      ref_W,                  // <- reference to packed weights on device
-                                     tensor_scale.device_ref(),  // <- reference to matrix Scale on device
+                                     tensor_scale.device_ref(),  // <- reference to quant scale on device
+                                     tensor_offset.device_ref(),  // <- reference to quant offset on device
                                      tensor_c.device_ref(),  // <- reference to matrix C on device
                                      tensor_d.device_ref(),  // <- reference to matrix D on device
                                      {alpha, beta},          // <- tuple of alpha and beta

@@ -63,6 +63,7 @@
 #include "cutlass/transform/threadblock/regular_tile_access_iterator_tensor_op.h"
 #include "cutlass/transform/threadblock/regular_tile_access_iterator_tensor_op_sm80.h"
 #include "cutlass/transform/threadblock/regular_tile_access_iterator_pitch_linear.h"
+#include "threadblock/optional_regular_tile_access_iter.h"
 //#include "cutlass/gemm/threadblock/mma_multistage.h"
 
 #include "cutlass/util/debug.h"
@@ -93,6 +94,8 @@ template <
     typename LayoutB,
     /// Element data type of quant scale
     typename ElementQScale,
+    /// Element data type of quant offset
+    typename ElementQOffset,
     /// Layout of quant scale
     typename LayoutQScale,
     /// Blocking dimensions for quantization
@@ -155,6 +158,8 @@ template <
     typename ElementB_,
     /// Element data type of quant scale
     typename ElementQScale_,
+    /// Element data type of quant offset
+    typename ElementQOffset_,
     /// Layout of quant scale
     typename LayoutQScale_,
     /// Blocking dimensions for quantization
@@ -173,7 +178,7 @@ template <
     cutlass::arch::CacheOperation::Kind CacheOpB>
 struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
                       layout::RowMajor, ElementB_, layout::ColumnMajor,
-                      ElementQScale_, LayoutQScale_, QuantBlocking_,
+                      ElementQScale_, ElementQOffset_, LayoutQScale_, QuantBlocking_,
                       ElementC_, LayoutC_, arch::OpClassTensorOp, Stages,
                       Operator_, false, CacheOpA, CacheOpB> {
   using Shape = Shape_;
@@ -185,6 +190,7 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   using LayoutB = layout::ColumnMajor;
 
   using ElementQScale = ElementQScale_;
+  using ElementQOffset = ElementQOffset_;
   using LayoutQScale = LayoutQScale_;
   using QuantBlocking = QuantBlocking_;
 
@@ -267,40 +273,54 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
       MatrixShape<Shape::kK/2, Shape::kN/2>, ElementB, SmemLayoutB, 1,
       IteratorThreadMapB>;
 
-  static cutlass::arch::CacheOperation::Kind const kCacheOpQScale =
-      cutlass::arch::CacheOperation::Global;
-
   using SmemLayoutQScale = LayoutQScale;
+  using SmemLayoutQOffset = LayoutQScale;
 
-  using ThreadblockQScaleShape = MatrixShape<Shape::kK / QuantBlocking::kRow, Shape::kN / QuantBlocking::kColumn>;
+  /// Threadblock-level quantization meta data shape
+  using ThreadblockQShape = MatrixShape<Shape::kK / QuantBlocking::kRow, Shape::kN / QuantBlocking::kColumn>;
   static_assert(Shape::kK % QuantBlocking::kRow == 0, "K must be multiple of QuantBlocking::kRow");
   static_assert(Shape::kN % QuantBlocking::kColumn == 0, "N must be multiple of QuantBlocking::kColumn");
-  static_assert(ThreadblockQScaleShape::kCount > 0, "QuantBlocking too big to fit in a thread block!");
+  static_assert(ThreadblockQShape::kCount > 0, "QuantBlocking too big to fit in a thread block!");
   static_assert(QuantBlocking::kRow == 1 || QuantBlocking::kColumn == 1,
         "Only support single column or row quantize blocking!");
   static_assert(QuantBlocking::kColumn != 1 || std::is_same<LayoutQScale, layout::RowMajor>::value,
         "Quant scale matrix's major dimension must have more elements, to facilitate fast loading!");
 
+  /// Threadblock-level quantization meta data shape in pitch-linear layout
+  using TBQPitchLinearShape = typename std::conditional<
+      std::is_same<LayoutQScale, layout::RowMajor>::value,
+      layout::PitchLinearShape<ThreadblockQShape::kColumn, ThreadblockQShape::kRow>,
+      layout::PitchLinearShape<ThreadblockQShape::kRow, ThreadblockQShape::kColumn>>::type;
+
   /// By default we would like to use 128b load. However, we can't load more than
   /// a column at a time in a column major layout.
-  using QScalePitchLinearShape = typename std::conditional<
-      std::is_same<LayoutQScale, layout::RowMajor>::value,
-      layout::PitchLinearShape<ThreadblockQScaleShape::kColumn, ThreadblockQScaleShape::kRow>,
-      layout::PitchLinearShape<ThreadblockQScaleShape::kRow, ThreadblockQScaleShape::kColumn>>::type;
   static int const kElementsPerAccessQScale =
-      (kAccessSizeInBits / sizeof_bits<ElementQScale>::value) > QScalePitchLinearShape::kContiguous
-          ? QScalePitchLinearShape::kContiguous
+      (kAccessSizeInBits / sizeof_bits<ElementQScale>::value) > TBQPitchLinearShape::kContiguous
+          ? TBQPitchLinearShape::kContiguous
           : (kAccessSizeInBits / sizeof_bits<ElementQScale>::value);
 
   /// quant scale is tiny.  Not all threads are needed.
-  static int const kAccessCntQScale = ThreadblockQScaleShape::kCount / kElementsPerAccessQScale;
+  static int const kAccessCntQScale = ThreadblockQShape::kCount / kElementsPerAccessQScale;
   static int const kThreadsQScale = (kAccessCntQScale > kThreads) ? kThreads : kAccessCntQScale;
 
   using IteratorThreadMapQScale = transform::PitchLinearStripminedThreadMap<
-      QScalePitchLinearShape, kThreadsQScale, kElementsPerAccessQScale>;
+      TBQPitchLinearShape, kThreadsQScale, kElementsPerAccessQScale>;
 
   using SmemIteratorQScale = transform::threadblock::RegularTileAccessIterator<
-        ThreadblockQScaleShape, ElementQScale, SmemLayoutQScale, 1, IteratorThreadMapQScale>;
+        ThreadblockQShape, ElementQScale, SmemLayoutQScale, 1, IteratorThreadMapQScale>;
+
+  static int const kElementsPerAccessQOffset =
+      (kAccessSizeInBits / sizeof_bits<ElementQOffset>::value) > TBQPitchLinearShape::kContiguous
+          ? TBQPitchLinearShape::kContiguous
+          : (kAccessSizeInBits / sizeof_bits<ElementQOffset>::value);
+  static int const kAccessCntQOffset = ThreadblockQShape::kCount / kElementsPerAccessQOffset;
+  static int const kThreadsQOffset = (kAccessCntQOffset > kThreads) ? kThreads : kAccessCntQOffset;
+
+  using IteratorThreadMapQOffset = transform::PitchLinearStripminedThreadMap<
+      TBQPitchLinearShape, kThreadsQOffset, kElementsPerAccessQOffset>;
+
+  using SmemIteratorQOffset = transform::threadblock::OptionalRegularTileAccessIterator<
+        ThreadblockQShape, ElementQOffset, SmemLayoutQOffset, 1, IteratorThreadMapQOffset, kThreads>;
 
   //
   // Warp-level matrix multiply operator
@@ -309,7 +329,7 @@ struct DefaultQuantBMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
   // Define the warp-level tensor op
   using MmaTensorOp = typename cutlass::gemm::warp::DefaultQuantBMmaTensorOp<
       WarpShape, InstructionShape, ElementA, SmemLayoutA, ElementB, SmemLayoutB,
-      ElementQScale, SmemLayoutQScale, QuantBlocking,
+      ElementQScale, SmemLayoutQScale, ElementQOffset, SmemLayoutQScale, QuantBlocking,
       ElementC, LayoutC, Operator, WarpCount::kK>::Type;
 
   /// Policy used to define MmaPipelined
