@@ -61,6 +61,8 @@ fp32 data by using NVIDIA Ampere architecture.
 
 #include "helper.h"
 
+#define USE_QUANT_OFFSET 1
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Result structure
@@ -181,7 +183,9 @@ using ElementW = uint8_t;                           // <- Weight is int4, uint8 
 using ElementWPack = cutlass::half_t;
 using LayoutInputWPack = cutlass::layout::ColumnMajor;  // <- layout of packed weight, must be column major
 using ElementQScale = cutlass::half_t;              // <- data type of quantization scale
+#ifdef USE_QUANT_OFFSET
 using ElementQOffset = uint8_t;                     // <- data type of quantization offset
+#endif
 using QuantBlocking = cutlass::MatrixShape<1,32>;   // <- weights block per scale (1,16/32/64), (16/32/64,1)
 using LayoutInputQScale = 
     std::conditional<QuantBlocking::kRow == 1,
@@ -229,7 +233,11 @@ using Gemm = cutlass::gemm::device::QuantBGemm<ElementInputA,
                                          ElementInputB,
                                          LayoutInputB,
                                          ElementQScale,
-                                         ElementQOffset, // std::monostate,  // <- no quantization offset
+#ifdef USE_QUANT_OFFSET
+                                         ElementQOffset,
+#else
+                                         std::monostate,  // <- no quantization offset
+#endif
                                          LayoutInputQScale,
                                          QuantBlocking,
                                          ElementOutput,
@@ -262,8 +270,10 @@ int run(Options &options) {
   // Create weight quantization scale and offset with dimensions K x N
   cutlass::HostTensor<ElementQScale, LayoutInputQScale> tensor_scale(
       {problem_size.k()/QuantBlocking::kRow, problem_size.n()/QuantBlocking::kColumn});
+#ifdef USE_QUANT_OFFSET
   cutlass::HostTensor<ElementQOffset, LayoutInputQScale> tensor_offset(
       {problem_size.k()/QuantBlocking::kRow, problem_size.n()/QuantBlocking::kColumn});
+#endif
 
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(
       problem_size.mn());  // <- Create matrix C with dimensions M x N
@@ -290,12 +300,14 @@ int run(Options &options) {
       ElementQScale(1.5),
       ElementQScale(-1.5),
       3);  // <- Fill weight scales on host with uniform-distribution random data
+#ifdef USE_QUANT_OFFSET
   cutlass::reference::host::TensorFillRandomUniform(
       tensor_offset.host_view(),
       1,
       ElementQOffset(0),
       ElementQOffset(15),
       0);  // <- Fill weight offsets on host with uniform-distribution random data
+#endif
   cutlass::reference::host::TensorFillRandomUniform(
       tensor_c.host_view(),
       1,
@@ -307,30 +319,41 @@ int run(Options &options) {
 
   // Fill tensor_weight with the patterned data, so that we can use
   // print to make sure the layout matches after loaded to registers
-  int loop_val = 0;
-  int offset = 3;
-  for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
-    for (int row_tile = 0; row_tile < tensor_weight.extent().row()/4; ++row_tile) {
-      for (int col = 0; col < 8; ++col) {
-        for (int row = 0; row < 4; ++row) {
-          auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
-          auto val = (loop_val + offset) % 256;
-          tensor_weight.at(weight_cord) = ElementW(val);
-          loop_val++;
-          if (loop_val == 256) {
-            loop_val = 0;
-            offset += 5;
-          }
-        }
-      }
-    }
-  }
-  for (int col = 0; col < tensor_scale.extent().column(); ++col){
-    for (int row = 0; row < tensor_scale.extent().row(); ++row){
-      tensor_scale.at({row, col}) = tensor_weight.at({row * QuantBlocking::kRow, col * QuantBlocking::kColumn});
-      tensor_offset.at({row, col}) = tensor_weight.at({row * QuantBlocking::kRow, col * QuantBlocking::kColumn});
-    }
-  }
+//   int loop_val = 0;
+//   int offset = 3;
+//   for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
+//     for (int row_tile = 0; row_tile < tensor_weight.extent().row()/4; ++row_tile) {
+//       for (int col = 0; col < 8; ++col) {
+//         for (int row = 0; row < 4; ++row) {
+//           auto weight_cord = cutlass::make_Coord(row_tile * 4 + row, col_tile * 8 + col);
+//           auto val = (loop_val + offset) % 256;
+//           tensor_weight.at(weight_cord) = ElementW(val);
+//           loop_val++;
+//           if (loop_val == 256) {
+//             loop_val = 0;
+//             offset += 11;
+//           }
+//         }
+//       }
+//     }
+//   }
+//   for (int col = 0; col < tensor_scale.extent().column(); ++col){
+//     int c =  col * QuantBlocking::kColumn;
+//     for (int row = 0; row < tensor_scale.extent().row(); ++row){
+//       int r = row * QuantBlocking::kRow;
+//       auto weight_cord = cutlass::make_Coord(r/2, c);
+//       int w = 0;
+//       if (r % 2 == 0) {
+//         w = int(tensor_weight.at(weight_cord) & 0x0f);
+//       } else {
+//         w = int(tensor_weight.at(weight_cord) >> 4);
+//       }
+//       tensor_scale.at({row, col}) = w;
+// #ifdef USE_QUANT_OFFSET
+//       tensor_offset.at({row, col}) = ElementQOffset(w);
+// #endif
+//     }
+//   }
 
   // int fill_val = -512;
   // int factor = 1;
@@ -346,13 +369,13 @@ int run(Options &options) {
   // }
 
   // std::cout << "Matrix Weight:\n" << tensor_weight.host_view() << "\n";
-  std::cout << "================== Matrix Scale ==========================\n";
-  for (int row = 0; row < tensor_scale.extent().row(); ++row){
-    for (int col = 0; col < tensor_scale.extent().column(); ++col){
-      printf("%.0f, ", float(tensor_scale.at({row, col})));
-    }
-    printf("\n");
-  }
+  // std::cout << "================== Matrix Scale ==========================\n";
+  // for (int row = 0; row < tensor_scale.extent().row(); ++row){
+  //   for (int col = 0; col < tensor_scale.extent().column(); ++col){
+  //     printf("%.0f, ", float(tensor_scale.at({row, col})));
+  //   }
+  //   printf("\n");
+  // }
 
   /////////////////////////////////////////////////////////////////////////////
   // Prepack weight matrix to facilitate matrix loading, depending on MMA
@@ -412,7 +435,9 @@ int run(Options &options) {
   tensor_a.sync_device();
   tensor_weight_prepacked.sync_device();
   tensor_scale.sync_device();
+#ifdef USE_QUANT_OFFSET
   tensor_offset.sync_device();
+#endif
   tensor_c.sync_device();
   tensor_d.sync_device();
   cutlass::TensorRef<ElementWPack const, LayoutInputWPack> ref_W(
@@ -432,7 +457,9 @@ int run(Options &options) {
                                      tensor_a.device_ref(),  // <- reference to matrix A on device
                                      ref_W,                  // <- reference to packed weights on device
                                      tensor_scale.device_ref(),  // <- reference to quant scale on device
+#ifdef USE_QUANT_OFFSET
                                      tensor_offset.device_ref(),  // <- reference to quant offset on device
+#endif
                                      tensor_c.device_ref(),  // <- reference to matrix C on device
                                      tensor_d.device_ref(),  // <- reference to matrix D on device
                                      {alpha, beta},          // <- tuple of alpha and beta
@@ -539,13 +566,18 @@ int run(Options &options) {
   for (int col = 0; col < tensor_b.extent().column(); ++col){
     for (int row = 0; row < tensor_b.extent().row(); ++row) {
       auto weight_cord = cutlass::make_Coord(row/2, col);
+      auto scale_cord = cutlass::make_Coord(row / QuantBlocking::kRow, col / QuantBlocking::kColumn);
+#ifdef USE_QUANT_OFFSET
+      const uint8_t offset = tensor_offset.at(scale_cord);
+#else
+      const uint8_t offset = 8;
+#endif
       int w = 0;
       if (row % 2 == 0) {
-        w = int(tensor_weight.at(weight_cord) & 0x0f) - 8;
+        w = int(tensor_weight.at(weight_cord) & 0x0f) - offset;
       } else {
-        w = int(tensor_weight.at(weight_cord) >> 4) - 8;
+        w = int(tensor_weight.at(weight_cord) >> 4) - offset;
       }
-      auto scale_cord = cutlass::make_Coord(row / QuantBlocking::kRow, col / QuantBlocking::kColumn);
       auto scale = tensor_scale.at(scale_cord);
       tensor_b.at({row, col}) = scale * float(w);
     }

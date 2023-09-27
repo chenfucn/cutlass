@@ -411,7 +411,8 @@ public:
   CUTLASS_DEVICE
   void transform(TransformedFragmentA &dst_A, TransformedFragmentB &dst_B,
                  FragmentA const &A, FragmentB const &B,
-                 FragmentQScale const &scales) const {
+                 FragmentQScale const &scales,
+                 FragmentQOffset const &offsets) const {
 
     //
     // Define conversions from source type to instruction type
@@ -422,7 +423,7 @@ public:
 
     Array<uint8_t, FragmentB::kElements * 2> const *ptr_B =
         reinterpret_cast<Array<uint8_t, FragmentB::kElements * 2> const *>(&B);
-    IteratorQScale::dequant(scales, *ptr_B, dst_B);
+    IteratorQScale::dequant(scales, offsets, *ptr_B, dst_B);
 
     #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
       internal::ConvertAndPack<typename ArchMmaOperator::ElementA, ElementA,

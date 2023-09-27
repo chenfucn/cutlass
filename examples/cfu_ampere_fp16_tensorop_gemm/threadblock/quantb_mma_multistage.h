@@ -51,6 +51,9 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////
 namespace{
 
+/////////////////////////////////////////////////////////////////////////////////////////////////
+/// Utilities for printing layout for the prepacked weights and quantization parameters
+/// 
 template<
     /// Data type of the prepacked weights
     typename ElementWeight,
@@ -76,10 +79,31 @@ struct QuantBLayoutDebug{
       if (block_id == 1 && warp_id == 0){
         const Element* ptr = reinterpret_cast<const Element*>(&frag);
         for (int i = 0; i < Size/4; i++, ptr+=4){
-          printf("T%.2d%c%d, %f, %f, %f, %f\n", threadIdx.x, label, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
+          printf("T%.2d%c%d, %.3f, %.3f, %.3f, %.3f\n", threadIdx.x, label, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
         }
       }
     }
+  }
+};
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+/// Dummy type when quant offset is not used, to avoid compilation error,
+/// and reduce runtime footprint
+///
+struct DummyType{
+  std::monostate dummy_;
+ public:
+  DummyType() = default;
+
+  CUTLASS_HOST_DEVICE
+  void* data() const {
+    return nullptr;
+  }
+
+  CUTLASS_HOST_DEVICE
+  std::monostate& operator[](int idx) {
+    return dummy_;
   }
 };
 
@@ -186,7 +210,7 @@ class QuantBMmaBase {
 
     using BufTypeQOffset = std::conditional_t<kHasQOffset,
           AlignedBuffer<typename Operator::ElementQOffset, ShapeQScale::kCount>,
-          std::monostate>;
+          DummyType>;
    public:
     //
     // Data members
@@ -291,7 +315,9 @@ public:
     ):
       warp_tile_iterator_A_(shared_storage.operand_A_ref(), lane_idx),
       warp_tile_iterator_B_(shared_storage.operand_B_ref(), lane_idx),
-      warp_tile_iterator_QScale_(shared_storage.operand_QScale_ref(), thread_idx, warp_idx, lane_idx) {}
+      warp_tile_iterator_QScale_(shared_storage.operand_QScale_ref(),
+             shared_storage.operand_QOffset_ref(), thread_idx, warp_idx, lane_idx)
+  {}
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -463,6 +489,11 @@ public:
 
     using WarpLoadedFragmentQScale = typename Operator::FragmentQScale;
     WarpLoadedFragmentQScale warp_loaded_frag_QScale_[2];
+
+    using WarpLoadedFragmentQOffset = typename std::conditional<kHasQOffset,
+            typename Operator::FragmentQOffset[2],
+            DummyType>::type;
+    WarpLoadedFragmentQOffset warp_loaded_frag_QOffset_;
   };
 
 
@@ -496,7 +527,7 @@ public:
   bool const should_load_qoffset_;
 
   /// Shared memory pointers for debug dumping
-  static constexpr bool debug_layout = true;
+  static constexpr bool debug_layout = false;
   using LayoutDebugType = typename std::conditional<debug_layout,
       QuantBLayoutDebug<typename IteratorB::Element, typename IteratorQScale::Element, typename IteratorQOffset::Element>,
       std::monostate>::type;
@@ -1007,7 +1038,9 @@ public:
       this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2]);
       ++this->warp_tile_iterator_B_;
 
-      this->warp_tile_iterator_QScale_.load(pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]);
+      this->warp_tile_iterator_QScale_.load(
+          pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2],
+          pipe_state.warp_loaded_frag_QOffset_[(warp_mma_k + 1) % 2]);
       ++this->warp_tile_iterator_QScale_;
 
       // Except for the first warp-tile, all warp-tiles convert their incoming shared memory fragments as necessary
@@ -1024,6 +1057,9 @@ public:
               }
             }
             LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[warp_mma_k % 2]), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+            if constexpr(kHasQOffset){
+              LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_[warp_mma_k % 2]), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+            }
           }
         }
 
@@ -1032,7 +1068,8 @@ public:
           pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
           pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
           pipe_state.warp_loaded_frag_B_[warp_mma_k % 2],
-          pipe_state.warp_loaded_frag_QScale_[warp_mma_k % 2]);
+          pipe_state.warp_loaded_frag_QScale_[warp_mma_k % 2],
+          pipe_state.warp_loaded_frag_QOffset_[warp_mma_k % 2]);
 
         if constexpr(debug_layout){
           LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[warp_mma_k % 2], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
@@ -1126,6 +1163,9 @@ public:
               }
             }
             LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+            if constexpr(kHasQOffset){
+              LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_[(warp_mma_k + 1) % 2]), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+            }
           }
         }
         warp_mma_.transform(
@@ -1133,7 +1173,8 @@ public:
           pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2],
           pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2],
           pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]);
+          pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2],
+          pipe_state.warp_loaded_frag_QOffset_[(warp_mma_k + 1) % 2]);
 
         if constexpr(debug_layout){
           LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
@@ -1179,7 +1220,9 @@ public:
     this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_[0]);
     ++this->warp_tile_iterator_B_;
 
-    this->warp_tile_iterator_QScale_.load(pipe_state.warp_loaded_frag_QScale_[0]);
+    this->warp_tile_iterator_QScale_.load(
+        pipe_state.warp_loaded_frag_QScale_[0],
+        pipe_state.warp_loaded_frag_QOffset_[0]);
     ++this->warp_tile_iterator_QScale_;
 
     if constexpr(debug_layout){
@@ -1194,6 +1237,9 @@ public:
           }
         }
         LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[0]), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        if constexpr(kHasQOffset){
+          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_[0]), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        }
       }
     }
 
@@ -1203,7 +1249,8 @@ public:
       pipe_state.warp_transformed_frag_B_[0],
       pipe_state.warp_loaded_frag_A_[0],
       pipe_state.warp_loaded_frag_B_[0],
-      pipe_state.warp_loaded_frag_QScale_[0]);
+      pipe_state.warp_loaded_frag_QScale_[0],
+      pipe_state.warp_loaded_frag_QOffset_[0]);
 
     if constexpr(debug_layout){
       LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[0], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);

@@ -221,8 +221,10 @@ struct QuantBGemm {
       return Status::kErrorMisalignedOperand;
     }
 
-    if (kHasQOffset && !TensorRef_aligned(ref_QOffset, Mma::IteratorQOffset::AccessType::kElements)) {
-      return Status::kErrorMisalignedOperand;
+    if constexpr(kHasQOffset) {
+      if (!TensorRef_aligned(ref_QOffset, Mma::IteratorQOffset::AccessType::kElements)) {
+        return Status::kErrorMisalignedOperand;
+      }
     }
 
     if (!TensorRef_aligned(ref_C, kAlignmentC)) {

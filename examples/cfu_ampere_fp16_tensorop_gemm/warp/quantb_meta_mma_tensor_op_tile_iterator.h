@@ -214,7 +214,9 @@ public:
   using StrideIndex = typename Layout::Stride::Index;
 
   using FragmentScale = Array<ElementScale, MetaTile::kFragementSize>;
-  using FragmentOffset = Array<ElementOffset, MetaTile::kFragementSize>;
+  using FragmentOffset = typename std::conditional<kHasOffset,
+          Array<ElementOffset, MetaTile::kFragementSize>,
+          std::monostate>::type;
 
   using AccessTypeScale = Array<ElementScale, kCoreTileFragementSize>;
   using AccessTypeOffset = Array<ElementOffset, kCoreTileFragementSize>;
@@ -236,21 +238,6 @@ public:
 
   CUTLASS_DEVICE
   QuantBMetaMmaTensorOpTileIterator(
-    TensorRefScale const &ref, 
-    int thread_idx,
-    int warp_idx,
-    int lane_idx
-  ): 
-    pointer_(ref.data()),
-    layout_(ref.layout()),
-    lane_position_(MetaTile::lane_position(lane_idx)),
-    pointer_offset_(nullptr),
-    layout_offset_() {
-//      assert(kHasOffset == false);
-  }
-
-  CUTLASS_DEVICE
-  QuantBMetaMmaTensorOpTileIterator(
     TensorRefScale const &ref,
     TensorRefOffset const &ref_offset,
     int thread_idx,
@@ -259,17 +246,15 @@ public:
   ): 
     pointer_(ref.data()),
     layout_(ref.layout()),
-    lane_position_(MetaTile::lane_position(lane_idx)),
     pointer_offset_(ref_offset.data()),
-    layout_offset_(ref.layout()) {
-      assert(kHasOffset == false);
-  }
+    layout_offset_(ref_offset.layout()),
+    lane_position_(MetaTile::lane_position(lane_idx)){}
 
   /// Loads a fragment
   CUTLASS_HOST_DEVICE
-  void load(FragmentScale &frag) {
-    int row = lane_position_.row() / BlockingShape::kRow;
-    int column = lane_position_.column() / BlockingShape::kColumn;
+  void load(FragmentScale &frag, FragmentOffset &frag_offset) {
+    const int row = lane_position_.row() / BlockingShape::kRow;
+    const int column = lane_position_.column() / BlockingShape::kColumn;
 
     AccessTypeScale* dst_ptr = reinterpret_cast<AccessTypeScale*>(frag.data());
     CUTLASS_PRAGMA_UNROLL
@@ -281,11 +266,25 @@ public:
         dst_ptr++;
       }
     }
+
+    if constexpr(kHasOffset){
+      AccessTypeOffset* dst_ptr = reinterpret_cast<AccessTypeOffset*>(frag_offset.data());
+      CUTLASS_PRAGMA_UNROLL
+      for (int n_idx = 0, c = column; n_idx < kMmaIterations; n_idx++, c += kNStride){
+        CUTLASS_PRAGMA_UNROLL
+        for (int mma_tile_idx = 0, r = row; mma_tile_idx < kTilesPerMma; mma_tile_idx++, r += kKTileStride){
+          AccessTypeOffset* src_ptr = reinterpret_cast<AccessTypeOffset*>(pointer_offset_ + layout_offset_({r, c}));
+          *dst_ptr = *src_ptr;
+          dst_ptr++;
+        }
+      }
+    }
   }
 
+  template <typename ElementT>
   CUTLASS_HOST_DEVICE
-  static Array<ElementScale, kExpandedSize> debug_expand(FragmentScale const &frag){
-    Array<ElementScale, kExpandedSize> ret;
+  static Array<ElementT, kExpandedSize> debug_expand(Array<ElementT, MetaTile::kFragementSize> const &frag){
+    Array<ElementT, kExpandedSize> ret;
     int out_idx = 0;
     CUTLASS_PRAGMA_UNROLL
     for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
@@ -306,8 +305,11 @@ public:
   }
 
   CUTLASS_HOST_DEVICE
-  static void dequant(FragmentScale const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<ElementScale, kExpandedSize>& dest){
-    static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm now.");
+  static void dequant(FragmentScale const &scales,
+                      FragmentOffset const &offsets,
+                      Array<uint8_t,kExpandedSize/2> const &weights,
+                      Array<ElementScale, kExpandedSize>& dest){
+    static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm.");
 
     int out_idx = 0;
     CUTLASS_PRAGMA_UNROLL
@@ -323,13 +325,22 @@ public:
 
         int w1 = weights[out_idx/2] & 0x0f;
         int w2 = weights[out_idx/2] >> 4;
+        int offset;
+        if constexpr(kHasOffset){
+          offset = offsets[idx];
+        } else {
+          offset = 8;
+        }
         ElementScale s = scales[idx];
-        dest[out_idx] = ElementScale(s * (w1 - 8));
+        dest[out_idx] = ElementScale(s * (w1 - offset));
         if constexpr (BlockingShape::kRow == 1){
           s = scales[idx+1];
+          if constexpr(kHasOffset){
+            offset = offsets[idx+1];
+          }
         }
         out_idx++;
-        dest[out_idx] = ElementScale(s * (w2 - 8));
+        dest[out_idx] = ElementScale(s * (w2 - offset));
         out_idx++;
       }
     }
@@ -435,13 +446,17 @@ public:
   using StrideIndex = typename Layout::Stride::Index;
 
   using FragmentScale = Array<ElementScale, MetaTile::kFragementSize>;
-  using FragmentOffset = Array<ElementOffset, MetaTile::kFragementSize>;
+  using FragmentOffset = typename std::conditional<kHasOffset,
+          Array<ElementOffset, MetaTile::kFragementSize>,
+          std::monostate>::type;
 
 private:
 
   ElementScale *pointer_;
-
   Layout layout_;
+
+  ElementOffset *pointer_offset_;
+  Layout layout_offset_;
 
   TensorCoord lane_position_;
 
@@ -452,34 +467,47 @@ public:
 
   CUTLASS_DEVICE
   QuantBMetaMmaTensorOpTileIterator(
-    TensorRefScale const &ref, 
+    TensorRefScale const &ref,
+    TensorRefOffset const &ref_offset,
     int thread_idx,
     int warp_idx,
     int lane_idx
   ): 
     pointer_(ref.data()),
     layout_(ref.layout()),
+    pointer_offset_(ref_offset.data()),
+    layout_offset_(ref_offset.layout()),
     lane_position_(MetaTile::lane_position(lane_idx))
      {}
 
   /// Loads a fragment
   CUTLASS_HOST_DEVICE
-  void load(FragmentScale &frag) {
-    int row = lane_position_.row() / BlockingShape::kRow;
-    int column = lane_position_.column() / BlockingShape::kColumn;
+  void load(FragmentScale &frag, FragmentOffset &frag_offset) {
+    const int row = lane_position_.row() / BlockingShape::kRow;
+    const int column = lane_position_.column() / BlockingShape::kColumn;
     static_assert(kTilesPerMma * kCoreTileFragementSize == 1, "Only support one meta data per core tile");
 
-    ElementScale* src_ptr = reinterpret_cast<ElementScale*>(pointer_ + layout_({row, column}));
-    ElementScale* dst_ptr = reinterpret_cast<ElementScale*>(frag.data());
+    ElementScale* src_ptr = pointer_ + layout_({row, column});
+    ElementScale* dst_ptr = frag.data();
     CUTLASS_PRAGMA_UNROLL
     for (int n_idx = 0; n_idx < kMmaIterations; n_idx++){
       dst_ptr[n_idx] = src_ptr[n_idx * kNStride];
     }
+
+    if constexpr(kHasOffset){
+      ElementOffset* src_ptr_offset = pointer_offset_ + layout_offset_({row, column});
+      ElementOffset* dst_ptr_offset = frag_offset.data();
+      CUTLASS_PRAGMA_UNROLL
+      for (int n_idx = 0; n_idx < kMmaIterations; n_idx++){
+        dst_ptr_offset[n_idx] = src_ptr_offset[n_idx * kNStride];
+      }
+    }
   }
 
+  template <typename ElementT>
   CUTLASS_HOST_DEVICE
-  static Array<ElementScale, kExpandedSize> debug_expand(FragmentScale const &frag){
-    Array<ElementScale, kExpandedSize> ret;
+  static Array<ElementT, kExpandedSize> debug_expand(Array<ElementT, MetaTile::kFragementSize> const &frag){
+    Array<ElementT, kExpandedSize> ret;
 
     int out_idx = 0;
     CUTLASS_PRAGMA_UNROLL
@@ -502,13 +530,22 @@ public:
   }
 
   CUTLASS_HOST_DEVICE
-  static void dequant(FragmentScale const &scales, Array<uint8_t,kExpandedSize/2> const &weights, Array<ElementScale, kExpandedSize>& dest){
+  static void dequant(FragmentScale const &scales,
+                      FragmentOffset const &offsets,
+                      Array<uint8_t,kExpandedSize/2> const &weights,
+                      Array<ElementScale, kExpandedSize>& dest){
     static_assert(kNRepeats == 1, "This is implied by BlockingShape::kColumn == 1");
     static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm now.");
 
     int out_idx = 0;
     CUTLASS_PRAGMA_UNROLL
     for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
+      int offset;
+      if constexpr(kHasOffset){
+        offset = offsets[n_out];
+      } else {
+        offset = 8;
+      }
       ElementScale s = scales[n_out];
       CUTLASS_PRAGMA_UNROLL
       for (int mma_tile_out_idx = 0; mma_tile_out_idx < kBTilesPerMma; mma_tile_out_idx++){
@@ -516,8 +553,8 @@ public:
         // 2 int4 weights out of a bytes. Valid for all 16b GEMM.
         int w1 = weights[out_idx/2] & 0x0f;
         int w2 = weights[out_idx/2] >> 4;
-        dest[out_idx] = ElementScale(s * (w1 - 8));
-        dest[out_idx + 1] = ElementScale(s * (w2 - 8));
+        dest[out_idx] = ElementScale(s * (w1 - offset));
+        dest[out_idx + 1] = ElementScale(s * (w2 - offset));
         out_idx += 2;
       }
     }
