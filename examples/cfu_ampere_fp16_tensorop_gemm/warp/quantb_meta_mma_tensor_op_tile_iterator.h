@@ -311,39 +311,96 @@ public:
                       Array<ElementScale, kExpandedSize>& dest){
     static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm.");
 
-    int out_idx = 0;
-    CUTLASS_PRAGMA_UNROLL
-    for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
-      int n_idx = n_out / kNRepeats;
+    if constexpr(kNumBsPerCoreTileFragement == 2
+                 && kBTilesPerMma == 2
+                 && BlockingShape::kRow == 1
+                 && sizeof(ElementScale) == 2){
+      // Optimize for a special case of:
+      //    16b gemm (kNumBsPerCoreTileFragement == 2)
+      //    2 B operand tiles per mma (kBTilesPerMma == 2)
+      //    (1,n) quantization blocking
+
+      const uint16_t* weights_ptr = reinterpret_cast<const uint16_t*>(weights.data());
+      const ElementScale* scales_ptr = scales.data();
+      const ElementOffset* offsets_ptr = nullptr;
+      if constexpr(kHasOffset) { offsets_ptr = offsets.data(); }
+
+      int out_idx = 0;
       CUTLASS_PRAGMA_UNROLL
-      for (int mma_tile_out_idx = 0; mma_tile_out_idx < kBTilesPerMma; mma_tile_out_idx++){
-        int mma_tile_idx = mma_tile_out_idx / (kBTilesPerMma / kTilesPerMma);
-
-        // We take advantage of the fact that kNumBsPerCoreTileFragement == 2 to extract
-        // 2 int4 weights out of a bytes. Valid for all 16b GEMM.
-        int idx = mma_tile_idx * kCoreTileFragementSize + n_idx * kCoreTileFragementSize * kTilesPerMma;
-
-        int w1 = weights[out_idx/2] & 0x0f;
-        int w2 = weights[out_idx/2] >> 4;
-        int offset;
+      for (int n_idx = 0; n_idx < kMmaIterations; n_idx++){
+        int offset0;
+        int offset1;
+        int offset2;
+        int offset3;
         if constexpr(kHasOffset){
-          offset = offsets[idx];
+          offset0 = offsets_ptr[0];
+          offset1 = offsets_ptr[1];
+          offset2 = offsets_ptr[2];
+          offset3 = offsets_ptr[3];
+          offsets_ptr += 4;
         } else {
-          offset = 8;
+          offset0 = 8;
+          offset1 = 8;
+          offset2 = 8;
+          offset3 = 8;
         }
-        ElementScale s = scales[idx];
-        dest[out_idx] = ElementScale(s * (w1 - offset));
-        if constexpr (BlockingShape::kRow == 1){
-          s = scales[idx+1];
-          if constexpr(kHasOffset){
-            offset = offsets[idx+1];
+        ElementScale s0 = scales_ptr[0];
+        ElementScale s1 = scales_ptr[1];
+        ElementScale s2 = scales_ptr[2];
+        ElementScale s3 = scales_ptr[3];
+        scales_ptr += 4;
+
+        for (int n_r = 0; n_r < kNRepeats; n_r++){
+          uint16_t w_quard = *weights_ptr;
+          weights_ptr++;
+          int w0 = w_quard & 0x0f;
+          int w1 = (w_quard >> 4) & 0x0f;
+          int w2 = (w_quard >> 8) & 0x0f;
+          int w3 = (w_quard >> 12);
+          auto d0 = ElementScale(s0 * (w0 - offset0));
+          auto d1 = ElementScale(s1 * (w1 - offset1));
+          auto d2 = ElementScale(s2 * (w2 - offset2));
+          auto d3 = ElementScale(s3 * (w3 - offset3));
+          dest[out_idx] = d0;
+          dest[out_idx+1] = d1;
+          dest[out_idx+2] = d2;
+          dest[out_idx+3] = d3;
+          out_idx+=4;
+        }
+      }
+
+    } else {
+      // unoptiomized path for other cases
+      int out_idx = 0;
+      int offset = 8;
+      CUTLASS_PRAGMA_UNROLL
+      for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
+        int n_idx = n_out / kNRepeats;
+        CUTLASS_PRAGMA_UNROLL
+        for (int mma_tile_out_idx = 0; mma_tile_out_idx < kBTilesPerMma; mma_tile_out_idx++){
+          int mma_tile_idx = mma_tile_out_idx / (kBTilesPerMma / kTilesPerMma);
+          CUTLASS_PRAGMA_UNROLL
+          for (int elem_out_idx = 0; elem_out_idx < kNumBsPerCoreTileFragement; elem_out_idx++){
+            int elem_idx = elem_out_idx / BlockingShape::kRow;
+            int idx = elem_idx + mma_tile_idx * kCoreTileFragementSize + n_idx * kCoreTileFragementSize * kTilesPerMma;
+            ElementScale s = scales[idx];
+            if constexpr(kHasOffset){
+              offset = offsets[idx];
+            }
+            int w;
+            if (out_idx % 2 == 0){
+              w = weights[out_idx/2] & 0x0f;
+            } else {
+              w = weights[out_idx/2] >> 4;
+            }
+            dest[out_idx] = ElementScale(s * (w - offset));
+            out_idx++;
           }
         }
-        out_idx++;
-        dest[out_idx] = ElementScale(s * (w2 - offset));
-        out_idx++;
       }
+
     }
+
   }
 
   /// Advances the pointer
