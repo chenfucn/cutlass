@@ -317,8 +317,8 @@ int run(Options &options) {
   cutlass::reference::host::TensorFill(
       tensor_d.host_view());  // <- fill matrix D on host with zeros
 
-  // Fill tensor_weight with the patterned data, so that we can use
-  // print to make sure the layout matches after loaded to registers
+//   // Fill tensor_weight with the patterned data, so that we can use
+//   // print to make sure the layout matches after loaded to registers
 //   int loop_val = 0;
 //   int offset = 3;
 //   for (int col_tile = 0; col_tile < tensor_weight.extent().column()/8; ++col_tile) {
@@ -369,13 +369,6 @@ int run(Options &options) {
   // }
 
   // std::cout << "Matrix Weight:\n" << tensor_weight.host_view() << "\n";
-  // std::cout << "================== Matrix Scale ==========================\n";
-  // for (int row = 0; row < tensor_scale.extent().row(); ++row){
-  //   for (int col = 0; col < tensor_scale.extent().column(); ++col){
-  //     printf("%.0f, ", float(tensor_scale.at({row, col})));
-  //   }
-  //   printf("\n");
-  // }
 
   /////////////////////////////////////////////////////////////////////////////
   // Prepack weight matrix to facilitate matrix loading, depending on MMA
@@ -431,12 +424,99 @@ int run(Options &options) {
 
   // std::cout << "Matrix Weight Prepacked:\n" << tensor_weight_prepacked.host_view() << "\n";
 
+  cutlass::HostTensor<ElementQScale, LayoutInputQScale> tensor_scale_prepacked(
+      {problem_size.k()/QuantBlocking::kRow, problem_size.n()/QuantBlocking::kColumn});
+#ifdef USE_QUANT_OFFSET
+  cutlass::HostTensor<ElementQOffset, LayoutInputQScale> tensor_offset_prepacked(
+      {problem_size.k()/QuantBlocking::kRow, problem_size.n()/QuantBlocking::kColumn});
+#endif
+
+  // Only prepacking scale and offset tensors for a often used special case:
+  //    16b gemm (2 elements per 32b register, operand tile shape 8x8)
+  //    2 B operand tiles per mma instruction stacked on k dimension
+  //    (1,n) quantization blocking
+  if constexpr(sizeof(ElementInputA) == 2
+               && ShapeMMAOp::kK == 16
+               && QuantBlocking::kRow == 1){
+      // In Ampere tensor op, each operand B tile is 8 x 8, in a warp of 32 threads, each thread
+      // holds a fragement of the tile containing 2 elements in the k dimension. Most often we use
+      // mma instruction shape of 16x8x16, which means 2 B tiles are stacked in the k dimension,
+      // as shown below (T stands for thread):
+      // T0, T4, T8, T12
+      // T1, T5, T9, T13
+      // T2, T6, T10, T14
+      // T3, T7, T11, T15
+      // T0, T4, T8, T12
+      // T1, T5, T9, T13
+      // T2, T6, T10, T14
+      // T3, T7, T11, T15
+      //
+      // We need to deliver quantization scale and offset elements to the corresponding threads,
+      // so we can perform dequantization efficiently. With a column major layout, each thread
+      // needs two seperate loads for a mma instruction, due to the tile fragement layout shown
+      // above. To reduce the number of loads, we rearrange each column as below, so we can use
+      // a single load to load fragements for two tiles:
+      // T0        T0
+      // T1        T0
+      // T2        T1
+      // T3   =>   T1
+      // T0        T2
+      // T1        T2
+      // T2        T3
+      // T3        T3
+      
+      for (int col = 0; col < tensor_scale.extent().column(); ++col){
+        for (int row_blk = 0; row_blk < tensor_scale.extent().row(); row_blk += 16){
+          for (int thread_id = 0; thread_id < 4; thread_id++){
+            const int dst_idx = row_blk + thread_id * 4;
+            const int src_idx = row_blk + thread_id * 2;
+            tensor_scale_prepacked.at({dst_idx + 0, col}) = tensor_scale.at({src_idx + 0, col});
+            tensor_scale_prepacked.at({dst_idx + 1, col}) = tensor_scale.at({src_idx + 1, col});
+            tensor_scale_prepacked.at({dst_idx + 2, col}) = tensor_scale.at({src_idx + 8, col});
+            tensor_scale_prepacked.at({dst_idx + 3, col}) = tensor_scale.at({src_idx + 9, col});
+          }
+        }
+      }
+
+#ifdef USE_QUANT_OFFSET
+      for (int col = 0; col < tensor_offset.extent().column(); ++col){
+        for (int row_blk = 0; row_blk < tensor_offset.extent().row(); row_blk += 16){
+          for (int thread_id = 0; thread_id < 4; thread_id++){
+            const int dst_idx = row_blk + thread_id * 4;
+            const int src_idx = row_blk + thread_id * 2;
+            tensor_offset_prepacked.at({dst_idx + 0, col}) = tensor_offset.at({src_idx + 0, col});
+            tensor_offset_prepacked.at({dst_idx + 1, col}) = tensor_offset.at({src_idx + 1, col});
+            tensor_offset_prepacked.at({dst_idx + 2, col}) = tensor_offset.at({src_idx + 8, col});
+            tensor_offset_prepacked.at({dst_idx + 3, col}) = tensor_offset.at({src_idx + 9, col});
+          }
+        }
+      }
+#endif
+  } else {
+    // In all other cases, we don't prepack scale or offset
+    tensor_scale_prepacked = tensor_scale;
+#ifdef USE_QUANT_OFFSET
+    tensor_offset_prepacked = tensor_offset;
+#endif
+  }
+
+  // std::cout << "================== Matrix Scale ==========================\n";
+  // for (int row = 0; row < tensor_scale_prepacked.extent().row(); ++row){
+  //   for (int col = 0; col < tensor_scale_prepacked.extent().column(); ++col){
+  //     printf("%.0f, ", float(tensor_scale_prepacked.at({row, col})));
+  //   }
+  //   printf("\n");
+  // }
+
+  // End of prepacking code
+  /////////////////////////////////////////////////////////////////////////////
+
   // Copy data from host to GPU
   tensor_a.sync_device();
   tensor_weight_prepacked.sync_device();
-  tensor_scale.sync_device();
+  tensor_scale_prepacked.sync_device();
 #ifdef USE_QUANT_OFFSET
-  tensor_offset.sync_device();
+  tensor_offset_prepacked.sync_device();
 #endif
   tensor_c.sync_device();
   tensor_d.sync_device();
@@ -456,9 +536,9 @@ int run(Options &options) {
   typename Gemm::Arguments arguments{problem_size,  // <- problem size of matrix multiplication
                                      tensor_a.device_ref(),  // <- reference to matrix A on device
                                      ref_W,                  // <- reference to packed weights on device
-                                     tensor_scale.device_ref(),  // <- reference to quant scale on device
+                                     tensor_scale_prepacked.device_ref(),  // <- reference to quant scale on device
 #ifdef USE_QUANT_OFFSET
-                                     tensor_offset.device_ref(),  // <- reference to quant offset on device
+                                     tensor_offset_prepacked.device_ref(),  // <- reference to quant offset on device
 #endif
                                      tensor_c.device_ref(),  // <- reference to matrix C on device
                                      tensor_d.device_ref(),  // <- reference to matrix D on device

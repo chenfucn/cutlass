@@ -104,8 +104,20 @@ public:
 
   CUTLASS_DEVICE
   static MatrixCoord lane_position(int lane_id) {
-    return make_Coord((lane_id % CoreTile::kContiguous) * kNumBsPerCoreTileFragement,
+    if constexpr(kNumBsPerCoreTileFragement == 2
+                 && kBTilesPerMma == 2
+                 && BlockingShape::kRow == 1){
+      // Optimize for a special case of:
+      //    16b gemm (kNumBsPerCoreTileFragement == 2)
+      //    2 B operand tiles per mma (kBTilesPerMma == 2)
+      //    (1,n) quantization blocking
+      // The weight and offset tensor is prepacked to reduce load instructions.
+      return make_Coord((lane_id % CoreTile::kContiguous) * 4,
          lane_id / CoreTile::kContiguous);
+    } else {
+      return make_Coord((lane_id % CoreTile::kContiguous) * kNumBsPerCoreTileFragement,
+         lane_id / CoreTile::kContiguous);
+    }
   }
 };
 
@@ -253,29 +265,62 @@ public:
   /// Loads a fragment
   CUTLASS_HOST_DEVICE
   void load(FragmentScale &frag, FragmentOffset &frag_offset) {
-    const int row = lane_position_.row() / BlockingShape::kRow;
-    const int column = lane_position_.column() / BlockingShape::kColumn;
+    if constexpr(kNumBsPerCoreTileFragement == 2
+                 && kBTilesPerMma == 2
+                 && BlockingShape::kRow == 1){
+      // Optimize for a special case of:
+      //    16b gemm (kNumBsPerCoreTileFragement == 2)
+      //    2 B operand tiles per mma (kBTilesPerMma == 2)
+      //    (1,n) quantization blocking
+      // The weight and offset tensor is prepacked to reduce load instructions.
+      const int row = lane_position_.row();
+      const int column = lane_position_.column() / BlockingShape::kColumn;
 
-    AccessTypeScale* dst_ptr = reinterpret_cast<AccessTypeScale*>(frag.data());
-    CUTLASS_PRAGMA_UNROLL
-    for (int n_idx = 0, c = column; n_idx < kMmaIterations; n_idx++, c += kNStride){
+      Array<ElementScale, 4> *dst_ptr = reinterpret_cast<Array<ElementScale, 4>*>(frag.data());
       CUTLASS_PRAGMA_UNROLL
-      for (int mma_tile_idx = 0, r = row; mma_tile_idx < kTilesPerMma; mma_tile_idx++, r += kKTileStride){
-        AccessTypeScale* src_ptr = reinterpret_cast<AccessTypeScale*>(pointer_ + layout_({r, c}));
+      for (int n_idx = 0, c = column; n_idx < kMmaIterations; n_idx++, c += kNStride){
+        Array<ElementScale, 4> *src_ptr = reinterpret_cast<Array<ElementScale, 4>*>(pointer_ + layout_({row, c}));
         *dst_ptr = *src_ptr;
         dst_ptr++;
       }
-    }
 
-    if constexpr(kHasOffset){
-      AccessTypeOffset* dst_ptr = reinterpret_cast<AccessTypeOffset*>(frag_offset.data());
+      if constexpr(kHasOffset){
+        Array<ElementOffset, 4> *dst_ptr_offset = reinterpret_cast<Array<ElementOffset, 4>*>(frag_offset.data());
+        CUTLASS_PRAGMA_UNROLL
+        for (int n_idx = 0, c = column; n_idx < kMmaIterations; n_idx++, c += kNStride){
+          Array<ElementOffset, 4> *src_ptr_offset = reinterpret_cast<Array<ElementOffset, 4>*>(pointer_offset_ + layout_offset_({row, c}));
+          *dst_ptr_offset = *src_ptr_offset;
+          dst_ptr_offset++;
+        }
+      }
+
+    } else {
+      // Other cases, offsets and scales are not prepacked.
+
+      const int row = lane_position_.row() / BlockingShape::kRow;
+      const int column = lane_position_.column() / BlockingShape::kColumn;
+
+      AccessTypeScale* dst_ptr = reinterpret_cast<AccessTypeScale*>(frag.data());
       CUTLASS_PRAGMA_UNROLL
       for (int n_idx = 0, c = column; n_idx < kMmaIterations; n_idx++, c += kNStride){
         CUTLASS_PRAGMA_UNROLL
         for (int mma_tile_idx = 0, r = row; mma_tile_idx < kTilesPerMma; mma_tile_idx++, r += kKTileStride){
-          AccessTypeOffset* src_ptr = reinterpret_cast<AccessTypeOffset*>(pointer_offset_ + layout_offset_({r, c}));
+          AccessTypeScale* src_ptr = reinterpret_cast<AccessTypeScale*>(pointer_ + layout_({r, c}));
           *dst_ptr = *src_ptr;
           dst_ptr++;
+        }
+      }
+
+      if constexpr(kHasOffset){
+        AccessTypeOffset* dst_ptr = reinterpret_cast<AccessTypeOffset*>(frag_offset.data());
+        CUTLASS_PRAGMA_UNROLL
+        for (int n_idx = 0, c = column; n_idx < kMmaIterations; n_idx++, c += kNStride){
+          CUTLASS_PRAGMA_UNROLL
+          for (int mma_tile_idx = 0, r = row; mma_tile_idx < kTilesPerMma; mma_tile_idx++, r += kKTileStride){
+            AccessTypeOffset* src_ptr = reinterpret_cast<AccessTypeOffset*>(pointer_offset_ + layout_offset_({r, c}));
+            *dst_ptr = *src_ptr;
+            dst_ptr++;
+          }
         }
       }
     }
@@ -313,30 +358,29 @@ public:
 
     if constexpr(kNumBsPerCoreTileFragement == 2
                  && kBTilesPerMma == 2
-                 && BlockingShape::kRow == 1
-                 && sizeof(ElementScale) == 2){
+                 && BlockingShape::kRow == 1){
       // Optimize for a special case of:
       //    16b gemm (kNumBsPerCoreTileFragement == 2)
       //    2 B operand tiles per mma (kBTilesPerMma == 2)
       //    (1,n) quantization blocking
 
-      const uint16_t* weights_ptr = reinterpret_cast<const uint16_t*>(weights.data());
+      ElementScale* dest_ptr = dest.data();
+      const uint8_t* weights_ptr = weights.data();
       const ElementScale* scales_ptr = scales.data();
       const ElementOffset* offsets_ptr = nullptr;
       if constexpr(kHasOffset) { offsets_ptr = offsets.data(); }
 
-      int out_idx = 0;
       CUTLASS_PRAGMA_UNROLL
       for (int n_idx = 0; n_idx < kMmaIterations; n_idx++){
-        int offset0;
-        int offset1;
-        int offset2;
-        int offset3;
+        int16_t offset0;
+        int16_t offset1;
+        int16_t offset2;
+        int16_t offset3;
         if constexpr(kHasOffset){
-          offset0 = offsets_ptr[0];
-          offset1 = offsets_ptr[1];
-          offset2 = offsets_ptr[2];
-          offset3 = offsets_ptr[3];
+          offset0 = int16_t(offsets_ptr[0]);
+          offset1 = int16_t(offsets_ptr[1]);
+          offset2 = int16_t(offsets_ptr[2]);
+          offset3 = int16_t(offsets_ptr[3]);
           offsets_ptr += 4;
         } else {
           offset0 = 8;
@@ -351,21 +395,19 @@ public:
         scales_ptr += 4;
 
         for (int n_r = 0; n_r < kNRepeats; n_r++){
-          uint16_t w_quard = *weights_ptr;
-          weights_ptr++;
-          int w0 = w_quard & 0x0f;
-          int w1 = (w_quard >> 4) & 0x0f;
-          int w2 = (w_quard >> 8) & 0x0f;
-          int w3 = (w_quard >> 12);
-          auto d0 = ElementScale(s0 * (w0 - offset0));
-          auto d1 = ElementScale(s1 * (w1 - offset1));
-          auto d2 = ElementScale(s2 * (w2 - offset2));
-          auto d3 = ElementScale(s3 * (w3 - offset3));
-          dest[out_idx] = d0;
-          dest[out_idx+1] = d1;
-          dest[out_idx+2] = d2;
-          dest[out_idx+3] = d3;
-          out_idx+=4;
+          auto w_pair0 = weights_ptr[0];
+          auto w_pair1 = weights_ptr[1];
+          weights_ptr+=2;
+
+          uint8_t w0 = w_pair0 & 0x0f;
+          uint8_t w1 = w_pair0 >> 4;
+          uint8_t w2 = w_pair1 & 0x0f;
+          uint8_t w3 = w_pair1 >> 4 ;
+          dest_ptr[0] = ElementScale(s0 * (w0 - offset0));
+          dest_ptr[1] = ElementScale(s1 * (w1 - offset1));
+          dest_ptr[2] = ElementScale(s2 * (w2 - offset2));
+          dest_ptr[3] = ElementScale(s3 * (w3 - offset3));
+          dest_ptr += 4;
         }
       }
 
