@@ -55,116 +55,16 @@ namespace device {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-/*! Gemm device-level operator. This is an interface to efficient CUTLASS GEMM kernels that may
-  be invoked from host code.
+/*! A specialized GEMM operator for quantized B GEMM.
 
-  The contributions of this class are:
-    
-    1. At compile time, it maps data types and high-level structural parameters onto 
-       specific CUTLASS components.
+  It is modified from cutlass::gemm::device::Gemm. Both this class and the original Gemm class
+  are pretty much boilerplate code that construct the Gemm kernel class, and pass parameters
+  and controls to it. The only difference is that this class has a few more template parameters
+  to support quantization.
 
-    2. At runtime, it maps logical arguments to GEMM problems to kernel parameters.
+  This implementation pretty much follows the design of cutlass. But this class seems to be
+  just a wrapper of the Gemm kernel class. Is this really necessary?
 
-    3. At runtime, it launches kernels on the device.
-
-  The intent is to provide a convenient mechanism for interacting with most plausible GEMM
-  configurations for each supported architecture. Consequently, not all parameters are exposed
-  to the top-level interface. Rather, sensible defaults at each level of the CUTLASS hierarchy
-  are selected to tradeoff simplicity of the interface with flexibility. We expect 
-  most configurations to be specified at this level. Applications with more exotic requirements 
-  may construct their kernels of interest using CUTLASS components at the threadblock, warp, 
-  and thread levels of abstraction.
-
-  CUTLASS exposes computations using the functor design pattern in which objects compose some
-  internal state with an overloaded function call operator. This enables decoupling of
-  initialization from execution, possibly reducing overhead during steady state phases of
-  application execution.
-
-  CUTLASS device-level operators expose an Arguments structure encompassing each logical
-  input to the computation. This is distinct from the kernel-level Params structure pattern
-  which contains application-specific precomputed state needed by the device code.
-
-  Example of a CUTLASS GEMM operator implementing the functionality of cuBLAS's SGEMM NN
-  is as follows:
-
-    //
-    // Instantiate the CUTLASS GEMM operator.
-    //
-
-    cutlass::gemm::device::Gemm<
-      float,
-      cutlass::layout::ColumnMajor,
-      float,
-      cutlass::layout::ColumnMajor,
-      float,
-      cutlass::layout::ColumnMajor
-    > gemm_op;
-
-    //
-    // Launch the GEMM operation on the device
-    //
-
-    cutlass::Status status = gemm_op({
-      {m, n, k},                          // GemmCoord problem_size,
-      {A, lda},                           // TensorRef<float, layout::ColumnMajor> ref_A,
-      {B, ldb},                           // TensorRef<float, layout::ColumnMajor> ref_B,
-      {C, ldc},                           // TensorRef<float, layout::ColumnMajor> ref_C,
-      {D, ldd},                           // TensorRef<float, layout::ColumnMajor> ref_D,
-      {alpha, beta}                       // EpilogueOutputOp::Params epilogue_op_params
-    });
-
-
-  A simplified view of the template is listed below.
-
-    template <
-      /// Element type for A matrix operand
-      typename ElementA,
-      
-      /// Layout type for A matrix operand
-      typename LayoutA,
-      
-      /// Element type for B matrix operand
-      typename ElementB,
-      
-      /// Layout type for B matrix operand
-      typename LayoutB,
-      
-      /// Element type for C and D matrix operands
-      typename ElementC,
-      
-      /// Layout type for C and D matrix operands
-      typename LayoutC,
-      
-      /// Element type for internal accumulation
-      typename ElementAccumulator,
-
-      /// Operator class tag
-      typename OperatorClass,
-      
-      /// Tag indicating architecture to tune for.  This is the minimum SM that
-      /// supports the intended feature. The device kernel can be built
-      /// targeting any SM larger than this number.
-      typename ArchTag,
-      
-      /// Threadblock-level tile size (concept: GemmShape)
-      typename ThreadblockShape,
-      
-      /// Warp-level tile size (concept: GemmShape)
-      typename WarpShape,
-      
-      /// Warp-level tile size (concept: GemmShape)
-      typename InstructionShape,
-      
-      /// Epilogue output operator
-      typename EpilogueOutputOp,
-      
-      /// Threadblock-level swizzling operator
-      typename ThreadblockSwizzle,
-      
-      /// Number of stages used in the pipelined mainloop
-      int Stages
-    >
-    class Gemm;
 */
 template <
     /// Element type for A matrix operand

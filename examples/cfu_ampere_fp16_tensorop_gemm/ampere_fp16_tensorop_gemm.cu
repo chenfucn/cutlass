@@ -104,7 +104,7 @@ struct Options {
   
   Options():
     help(false),
-    problem_size({32, 256, 512}),
+    problem_size({128, 512, 256}),
     batch_count(1),
     reference_check(true),
     iterations(20),
@@ -174,7 +174,7 @@ using ElementAccumulator = float;                   // <- data type of accumulat
 using ElementComputeEpilogue = ElementAccumulator;  // <- data type of epilogue operations
 using ElementInputA = cutlass::half_t;              // <- data type of elements in input matrix A
 using ElementInputB = cutlass::half_t;              // <- data type of elements in input matrix B
-using ElementOutput = float;                        // <- data type of elements in output matrix D
+using ElementOutput = cutlass::half_t;              // <- data type of elements in output matrix D
 
 // Quantization parameter for B matrix
 using ElementW = uint8_t;                           // <- Weight is int4, uint8 for two of them
@@ -206,9 +206,9 @@ using SmArch = cutlass::arch::Sm80;
 
 // This code section describes the tile size a thread block will compute
 using ShapeMMAThreadBlock =
-    cutlass::gemm::GemmShape<32, 128, 64>;
+    cutlass::gemm::GemmShape<128, 256, 64>;
 // This code section describes tile size a warp will compute
-using ShapeMMAWarp = cutlass::gemm::GemmShape<32, 64, 64>;
+using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 64>;
 // This code section describes the size of MMA op
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;
 
@@ -226,7 +226,7 @@ using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
     ElementComputeEpilogue>;  // <- data type for alpha/beta in linear combination function
 
 // Number of pipelines you want to use
-constexpr int NumStages = 4;
+constexpr int NumStages = 3;
 
 using Gemm = cutlass::gemm::device::QuantBGemm<ElementInputA,
                                          LayoutInputA,
@@ -398,6 +398,8 @@ int run(Options &options) {
   //
   // This pack a 8x16 int8 tile into a 16x8 int8 tile, i.e. a 8x8 16b tile
   /////////////////////////////////////////////////////////////////////////////
+  std::cout << "Prepacking weight matrix and quantization meta data ...\n";
+
   cutlass::HostTensor<ElementW, LayoutInputB> tensor_weight_prepacked(
     cutlass::make_Coord(problem_size.k(), problem_size.n()/2));
   auto t0_base = cutlass::make_Coord(0, 0);
@@ -511,7 +513,7 @@ int run(Options &options) {
   // End of prepacking code
   /////////////////////////////////////////////////////////////////////////////
 
-  // Copy data from host to GPU
+  std::cout << "Copy data from host to GPU...\n";
   tensor_a.sync_device();
   tensor_weight_prepacked.sync_device();
   tensor_scale_prepacked.sync_device();
@@ -578,6 +580,8 @@ int run(Options &options) {
       return -1;
     }
   }
+
+  std::cout << "Running Quantized Gemm...\n";
 
   // Record an event at the start of a series of GEMMs
   result.error = cudaEventRecord(events[0]);

@@ -64,7 +64,6 @@
 #include "cutlass/transform/threadblock/regular_tile_access_iterator_tensor_op_sm80.h"
 #include "cutlass/transform/threadblock/regular_tile_access_iterator_pitch_linear.h"
 #include "threadblock/optional_regular_tile_access_iter.h"
-//#include "cutlass/gemm/threadblock/mma_multistage.h"
 
 #include "cutlass/util/debug.h"
 #include "cutlass/util/device_dump.h"

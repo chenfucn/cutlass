@@ -252,8 +252,6 @@ public:
   QuantBMetaMmaTensorOpTileIterator(
     TensorRefScale const &ref,
     TensorRefOffset const &ref_offset,
-    int thread_idx,
-    int warp_idx,
     int lane_idx
   ): 
     pointer_(ref.data()),
@@ -568,8 +566,6 @@ public:
   QuantBMetaMmaTensorOpTileIterator(
     TensorRefScale const &ref,
     TensorRefOffset const &ref_offset,
-    int thread_idx,
-    int warp_idx,
     int lane_idx
   ): 
     pointer_(ref.data()),

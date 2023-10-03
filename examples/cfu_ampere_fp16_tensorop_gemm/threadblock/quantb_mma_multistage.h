@@ -316,7 +316,7 @@ public:
       warp_tile_iterator_A_(shared_storage.operand_A_ref(), lane_idx),
       warp_tile_iterator_B_(shared_storage.operand_B_ref(), lane_idx),
       warp_tile_iterator_QScale_(shared_storage.operand_QScale_ref(),
-             shared_storage.operand_QOffset_ref(), thread_idx, warp_idx, lane_idx)
+             shared_storage.operand_QOffset_ref(), lane_idx)
   {}
 };
 

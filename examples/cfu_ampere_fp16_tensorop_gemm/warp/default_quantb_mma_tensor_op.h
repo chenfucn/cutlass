@@ -43,44 +43,6 @@ namespace warp {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <
-    /// Size of the Gemm problem - concept: gemm::GemmShape<>
-    typename WarpShape_,
-    /// Shape of one matrix production operation (concept: GemmShape)
-    typename InstructionShape_,
-    /// Data type of A elements
-    typename ElementA_,
-    /// Layout of A matrix (concept: MatrixLayout)
-    typename LayoutA_,
-    /// Data type of B elements
-    typename ElementB_,
-    /// Layout of B matrix (concept: MatrixLayout)
-    typename LayoutB_,
-    /// Data type of quant scales
-    typename ElementQScale_,
-    /// Layout of quant scales (concept: MatrixLayout)
-    typename SmemLayoutQScale_,
-    /// Data type of quant offsets
-    typename ElementQOffset_,
-    /// Layout of quant offsets (concept: MatrixLayout)
-    typename SmemLayoutQOffset_,
-    /// Blocking size of quantization
-    typename QuantBlocking_,
-    /// Element type of C matrix
-    typename ElementC_,
-    /// Layout of C matrix (concept: MatrixLayout)
-    typename LayoutC_,
-    /// Operator describing the tensor operation
-    typename Operator_ = arch::OpMultiplyAdd,
-    /// Number of partitions along K dimension
-    int PartitionsK = 1,
-    /// Store the accumulators in row major or column major.  Row major is used
-    /// when output layout is interleaved.
-    bool AccumulatorsInRowMajor = false>
-struct DefaultQuantBMmaTensorOp;
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
 /// Partial specialization for m-by-n-by-kgroup
 template <
     /// Shape of one matrix production operation (concept: GemmShape)
@@ -110,12 +72,12 @@ template <
     /// Layout of C matrix (concept: MatrixLayout)
     typename LayoutC,
     /// Operator describing the tensor operation
-    typename Operator_,
+    typename Operator_ = arch::OpMultiplyAdd,
     /// Number of partitions along K dimension
-    int PartitionsK,
+    int PartitionsK = 1,
     /// Store the accumulators in row major or column major.  Row major is used
     /// when output layout is interleaved.
-    bool AccumulatorsInRowMajor>
+    bool AccumulatorsInRowMajor = false>
 struct DefaultQuantBMmaTensorOp {
   using Policy = cutlass::gemm::warp::MmaTensorOpPolicy<
       cutlass::arch::Mma<InstructionShape_, 32, ElementA,
