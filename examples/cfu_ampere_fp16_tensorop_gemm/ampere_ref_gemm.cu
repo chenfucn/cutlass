@@ -176,9 +176,9 @@ using SmArch = cutlass::arch::Sm80;
 
 // This code section describes the tile size a thread block will compute
 using ShapeMMAThreadBlock =
-    cutlass::gemm::GemmShape<128, 128, 64>;
+    cutlass::gemm::GemmShape<64, 128, 64>;
 // This code section describes tile size a warp will compute
-using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 64>;
+using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 32, 64>;
 // This code section describes the size of MMA op
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;
 

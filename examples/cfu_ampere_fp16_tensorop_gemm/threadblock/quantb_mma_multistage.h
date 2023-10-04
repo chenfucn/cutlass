@@ -481,18 +481,17 @@ public:
 
     /// Pair of A fragments used to overlap shared memory loads and math instructions
     WarpLoadedFragmentA warp_loaded_frag_A_[2];
-    WarpTransformedFragmentA warp_transformed_frag_A_[2];
 
     /// Pair of B fragments used to overlap shared memory loads and math instructions
-    WarpLoadedFragmentB warp_loaded_frag_B_[2];
+    WarpLoadedFragmentB warp_loaded_frag_B_;
     WarpTransformedFragmentB warp_transformed_frag_B_[2];
 
     using WarpLoadedFragmentQScale = typename Operator::FragmentQScale;
-    WarpLoadedFragmentQScale warp_loaded_frag_QScale_[2];
+    WarpLoadedFragmentQScale warp_loaded_frag_QScale_;
 
     using WarpLoadedFragmentQOffset = typename std::conditional<kHasQOffset,
-            typename Operator::FragmentQOffset[2],
-            DummyType>::type;
+            typename Operator::FragmentQOffset,
+            std::monostate>::type;
     WarpLoadedFragmentQOffset warp_loaded_frag_QOffset_;
   };
 
@@ -1028,48 +1027,50 @@ public:
     CUTLASS_PRAGMA_UNROLL
     for (int warp_mma_k = 0; warp_mma_k < Base::kWarpGemmIterations; ++warp_mma_k) {
 
-      // Load the next warp-tile's A fragment from shared memory
-      this->warp_tile_iterator_A_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
-      this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2]);
-      ++this->warp_tile_iterator_A_;
+      // Loading next warp-level tile from shared memory, only skip it if we
+      // are at the very last iteration.
+      // Things to consider: this is a really complex condition to evaluate,
+      // only brings 1% performance gain. Skipping this judgement does not
+      // affect correctness. Is there a way to add branch hint?
+      if ((gemm_k_iterations != (1 - Base::kStages)) || (warp_mma_k != (Base::kWarpGemmIterations - 1))) {
+        // Load the next warp-tile's B fragment from shared memory
+        this->warp_tile_iterator_QScale_.load(
+            pipe_state.warp_loaded_frag_QScale_,
+            pipe_state.warp_loaded_frag_QOffset_);
+        ++this->warp_tile_iterator_QScale_;
 
-      // Load the next warp-tile's B fragment from shared memory
-      this->warp_tile_iterator_B_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
-      this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2]);
-      ++this->warp_tile_iterator_B_;
+        this->warp_tile_iterator_B_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
+        this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_);
+        ++this->warp_tile_iterator_B_;
 
-      this->warp_tile_iterator_QScale_.load(
-          pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_loaded_frag_QOffset_[(warp_mma_k + 1) % 2]);
-      ++this->warp_tile_iterator_QScale_;
+        // Load the next warp-tile's A fragment from shared memory
+        this->warp_tile_iterator_A_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
+        this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2]);
+        ++this->warp_tile_iterator_A_;
 
-      // Except for the first warp-tile, all warp-tiles convert their incoming shared memory fragments as necessary
-      if (warp_mma_k > 0) {
         if constexpr(debug_layout){
           if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0){
             if (layout_debug_.lane_id_ == 0) {
               printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, warp_mma_k % Base::kWarpGemmIterations);
             }
             {
-              uint8_t* ptr = reinterpret_cast<uint8_t*>(&(pipe_state.warp_loaded_frag_B_[warp_mma_k % 2]));
+              uint8_t* ptr = reinterpret_cast<uint8_t*>(&(pipe_state.warp_loaded_frag_B_));
               for (int i = 0; i < 16/2; i++, ptr+=2){
                 printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
               }
             }
-            LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[warp_mma_k % 2]), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+            LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
             if constexpr(kHasQOffset){
-              LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_[warp_mma_k % 2]), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+              LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
             }
           }
         }
 
         warp_mma_.transform(
-          pipe_state.warp_transformed_frag_A_[warp_mma_k % 2],
-          pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
-          pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
-          pipe_state.warp_loaded_frag_B_[warp_mma_k % 2],
-          pipe_state.warp_loaded_frag_QScale_[warp_mma_k % 2],
-          pipe_state.warp_loaded_frag_QOffset_[warp_mma_k % 2]);
+          pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2],
+          pipe_state.warp_loaded_frag_B_,
+          pipe_state.warp_loaded_frag_QScale_,
+          pipe_state.warp_loaded_frag_QOffset_);
 
         if constexpr(debug_layout){
           LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[warp_mma_k % 2], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
@@ -1080,7 +1081,7 @@ public:
       if (Detail::kStagedAccumulation) {
         warp_mma_(
           pipe_state.tmp_accum_,
-          pipe_state.warp_transformed_frag_A_[warp_mma_k % 2],
+          pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
           pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
           pipe_state.tmp_accum_
         );
@@ -1093,7 +1094,7 @@ public:
       } else {
         warp_mma_(
           accum,
-          pipe_state.warp_transformed_frag_A_[warp_mma_k % 2],
+          pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
           pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
           accum
         );
@@ -1147,40 +1148,6 @@ public:
         }
       }
 
-      // The last warp-tile also converts the shared memory fragments used by
-      // the first warp-tile of the next iteration, if necessary (so we can
-      // immediately start issuing MMA instructions at the top of the loop )
-      if (warp_mma_k + 1 == Base::kWarpGemmIterations) {
-        if constexpr(debug_layout){
-          if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0){
-            if (layout_debug_.lane_id_ == 0) {
-              printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, (warp_mma_k + 1) % Base::kWarpGemmIterations);
-            }
-            {
-              uint8_t* ptr = reinterpret_cast<uint8_t*>(&(pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2]));
-              for (int i = 0; i < 16/2; i++, ptr+=2){
-                printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
-              }
-            }
-            LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2]), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-            if constexpr(kHasQOffset){
-              LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_[(warp_mma_k + 1) % 2]), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-            }
-          }
-        }
-        warp_mma_.transform(
-          pipe_state.warp_transformed_frag_A_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_loaded_frag_QOffset_[(warp_mma_k + 1) % 2]);
-
-        if constexpr(debug_layout){
-          LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-        }
-      }
-
     }
   }
 
@@ -1210,20 +1177,20 @@ public:
       }
     }
 
+    // Load first warp-tile's B fragment from shared memory
+    this->warp_tile_iterator_QScale_.load(
+        pipe_state.warp_loaded_frag_QScale_,
+        pipe_state.warp_loaded_frag_QOffset_);
+    ++this->warp_tile_iterator_QScale_;
+
+    this->warp_tile_iterator_B_.set_kgroup_index(0);
+    this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_);
+    ++this->warp_tile_iterator_B_;
+
     // Load first warp-tile's A fragment from shared memory
     this->warp_tile_iterator_A_.set_kgroup_index(0);
     this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[0]);
     ++this->warp_tile_iterator_A_;
-
-    // Load first warp-tile's B fragment from shared memory
-    this->warp_tile_iterator_B_.set_kgroup_index(0);
-    this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_[0]);
-    ++this->warp_tile_iterator_B_;
-
-    this->warp_tile_iterator_QScale_.load(
-        pipe_state.warp_loaded_frag_QScale_[0],
-        pipe_state.warp_loaded_frag_QOffset_[0]);
-    ++this->warp_tile_iterator_QScale_;
 
     if constexpr(debug_layout){
       if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0){
@@ -1231,26 +1198,24 @@ public:
           printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, 0);
         }
         {
-          uint8_t* ptr = reinterpret_cast<uint8_t*>(&(pipe_state.warp_loaded_frag_B_[0]));
+          uint8_t* ptr = reinterpret_cast<uint8_t*>(&(pipe_state.warp_loaded_frag_B_));
           for (int i = 0; i < 16/2; i++, ptr+=2){
             printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
           }
         }
-        LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_[0]), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
         if constexpr(kHasQOffset){
-          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_[0]), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
         }
       }
     }
 
     // Transform, if necessary, the first warp-tile's shared memory fragments
     warp_mma_.transform(
-      pipe_state.warp_transformed_frag_A_[0],
       pipe_state.warp_transformed_frag_B_[0],
-      pipe_state.warp_loaded_frag_A_[0],
-      pipe_state.warp_loaded_frag_B_[0],
-      pipe_state.warp_loaded_frag_QScale_[0],
-      pipe_state.warp_loaded_frag_QOffset_[0]);
+      pipe_state.warp_loaded_frag_B_,
+      pipe_state.warp_loaded_frag_QScale_,
+      pipe_state.warp_loaded_frag_QOffset_);
 
     if constexpr(debug_layout){
       LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[0], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
