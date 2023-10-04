@@ -36,3 +36,9 @@ cutlass_example_add_executable(
   ampere_fp16_tensorop_gemm.cu
   )
 
+
+cutlass_example_add_executable(
+  ampere_ref_gemm
+    ampere_ref_gemm.cu
+    )
+  
