@@ -363,50 +363,40 @@ public:
       //    (1,n) quantization blocking
 
       ElementScale* dest_ptr = dest.data();
-      const uint8_t* weights_ptr = weights.data();
+      const int8_t* weights_ptr = reinterpret_cast<const int8_t*>(weights.data());
       const ElementScale* scales_ptr = scales.data();
       const ElementOffset* offsets_ptr = nullptr;
       if constexpr(kHasOffset) { offsets_ptr = offsets.data(); }
 
       CUTLASS_PRAGMA_UNROLL
       for (int n_idx = 0; n_idx < kMmaIterations; n_idx++){
-        int16_t offset0;
-        int16_t offset1;
-        int16_t offset2;
-        int16_t offset3;
-        if constexpr(kHasOffset){
-          offset0 = int16_t(offsets_ptr[0]);
-          offset1 = int16_t(offsets_ptr[1]);
-          offset2 = int16_t(offsets_ptr[2]);
-          offset3 = int16_t(offsets_ptr[3]);
-          offsets_ptr += 4;
-        } else {
-          offset0 = 8;
-          offset1 = 8;
-          offset2 = 8;
-          offset3 = 8;
-        }
-        ElementScale s0 = scales_ptr[0];
-        ElementScale s1 = scales_ptr[1];
-        ElementScale s2 = scales_ptr[2];
-        ElementScale s3 = scales_ptr[3];
-        scales_ptr += 4;
-
         for (int n_r = 0; n_r < kNRepeats; n_r++){
           auto w_pair0 = weights_ptr[0];
           auto w_pair1 = weights_ptr[1];
           weights_ptr+=2;
 
-          uint8_t w0 = w_pair0 & 0x0f;
-          uint8_t w1 = w_pair0 >> 4;
-          uint8_t w2 = w_pair1 & 0x0f;
-          uint8_t w3 = w_pair1 >> 4 ;
-          dest_ptr[0] = ElementScale(s0 * (w0 - offset0));
-          dest_ptr[1] = ElementScale(s1 * (w1 - offset1));
-          dest_ptr[2] = ElementScale(s2 * (w2 - offset2));
-          dest_ptr[3] = ElementScale(s3 * (w3 - offset3));
+          int8_t w0 = w_pair0 & 0x0f;
+          int8_t w1 = (w_pair0 >> 4) & 0x0f;
+          int8_t w2 = w_pair1 & 0x0f;
+          int8_t w3 = (w_pair1 >> 4) & 0x0f ;
+          if constexpr(kHasOffset){
+            dest_ptr[0] = ElementScale(scales_ptr[0] * (w0 - int8_t(offsets_ptr[0])));
+            dest_ptr[1] = ElementScale(scales_ptr[1] * (w1 - int8_t(offsets_ptr[1])));
+            dest_ptr[2] = ElementScale(scales_ptr[2] * (w2 - int8_t(offsets_ptr[2])));
+            dest_ptr[3] = ElementScale(scales_ptr[3] * (w3 - int8_t(offsets_ptr[3])));
+          } else {
+            dest_ptr[0] = ElementScale(scales_ptr[0] * (w0 - 8));
+            dest_ptr[1] = ElementScale(scales_ptr[1] * (w1 - 8));
+            dest_ptr[2] = ElementScale(scales_ptr[2] * (w2 - 8));
+            dest_ptr[3] = ElementScale(scales_ptr[3] * (w3 - 8));
+          }
           dest_ptr += 4;
         }
+
+        if constexpr(kHasOffset){
+          offsets_ptr += 4;
+        }
+        scales_ptr += 4;
       }
 
     } else {

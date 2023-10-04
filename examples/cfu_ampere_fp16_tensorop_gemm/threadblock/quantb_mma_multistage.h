@@ -416,11 +416,11 @@ public:
   /// Minimum architecture is Sm80 to support cp.async
   using ArchTag = arch::Sm80;
 
-  /// Complex transform on A operand
-  static ComplexTransform const kTransformA = Operator::kTransformA;
+  // /// Complex transform on A operand
+  // static ComplexTransform const kTransformA = Operator::kTransformA;
 
-  /// Complex transform on B operand
-  static ComplexTransform const kTransformB = Operator::kTransformB;
+  // /// Complex transform on B operand
+  // static ComplexTransform const kTransformB = Operator::kTransformB;
 
   /// Internal structure exposed for introspection.
   struct Detail {
@@ -473,7 +473,6 @@ public:
 
     using WarpLoadedFragmentA = typename Operator::FragmentA;
     using WarpLoadedFragmentB = typename Operator::FragmentB;
-    using WarpTransformedFragmentA = typename Operator::TransformedFragmentA;
     using WarpTransformedFragmentB = typename Operator::TransformedFragmentB;
 
     /// Temporary accumulator to facilitate staged-accumulation
@@ -481,7 +480,6 @@ public:
 
     /// Pair of A fragments used to overlap shared memory loads and math instructions
     WarpLoadedFragmentA warp_loaded_frag_A_[2];
-    WarpTransformedFragmentA warp_transformed_frag_A_[2];
 
     /// Pair of B fragments used to overlap shared memory loads and math instructions
     WarpLoadedFragmentB warp_loaded_frag_B_[2];
@@ -1064,9 +1062,7 @@ public:
         }
 
         warp_mma_.transform(
-          pipe_state.warp_transformed_frag_A_[warp_mma_k % 2],
           pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
-          pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
           pipe_state.warp_loaded_frag_B_[warp_mma_k % 2],
           pipe_state.warp_loaded_frag_QScale_[warp_mma_k % 2],
           pipe_state.warp_loaded_frag_QOffset_[warp_mma_k % 2]);
@@ -1080,7 +1076,7 @@ public:
       if (Detail::kStagedAccumulation) {
         warp_mma_(
           pipe_state.tmp_accum_,
-          pipe_state.warp_transformed_frag_A_[warp_mma_k % 2],
+          pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
           pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
           pipe_state.tmp_accum_
         );
@@ -1093,7 +1089,7 @@ public:
       } else {
         warp_mma_(
           accum,
-          pipe_state.warp_transformed_frag_A_[warp_mma_k % 2],
+          pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
           pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
           accum
         );
@@ -1169,9 +1165,7 @@ public:
           }
         }
         warp_mma_.transform(
-          pipe_state.warp_transformed_frag_A_[(warp_mma_k + 1) % 2],
           pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2],
           pipe_state.warp_loaded_frag_B_[(warp_mma_k + 1) % 2],
           pipe_state.warp_loaded_frag_QScale_[(warp_mma_k + 1) % 2],
           pipe_state.warp_loaded_frag_QOffset_[(warp_mma_k + 1) % 2]);
@@ -1210,11 +1204,6 @@ public:
       }
     }
 
-    // Load first warp-tile's A fragment from shared memory
-    this->warp_tile_iterator_A_.set_kgroup_index(0);
-    this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[0]);
-    ++this->warp_tile_iterator_A_;
-
     // Load first warp-tile's B fragment from shared memory
     this->warp_tile_iterator_B_.set_kgroup_index(0);
     this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_[0]);
@@ -1224,6 +1213,11 @@ public:
         pipe_state.warp_loaded_frag_QScale_[0],
         pipe_state.warp_loaded_frag_QOffset_[0]);
     ++this->warp_tile_iterator_QScale_;
+
+    // Load first warp-tile's A fragment from shared memory
+    this->warp_tile_iterator_A_.set_kgroup_index(0);
+    this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[0]);
+    ++this->warp_tile_iterator_A_;
 
     if constexpr(debug_layout){
       if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0){
@@ -1245,9 +1239,7 @@ public:
 
     // Transform, if necessary, the first warp-tile's shared memory fragments
     warp_mma_.transform(
-      pipe_state.warp_transformed_frag_A_[0],
       pipe_state.warp_transformed_frag_B_[0],
-      pipe_state.warp_loaded_frag_A_[0],
       pipe_state.warp_loaded_frag_B_[0],
       pipe_state.warp_loaded_frag_QScale_[0],
       pipe_state.warp_loaded_frag_QOffset_[0]);

@@ -240,9 +240,8 @@ public:
   /// Storage for A tile
   using FragmentA = typename IteratorA::Fragment;
 
-  /// Storage for transformed A tile
-  using TransformedFragmentA =
-      Array<typename ArchMmaOperator::ElementA, FragmentA::kElements>;
+  static_assert(std::is_same<typename ArchMmaOperator::ElementA, typename FragmentA::Element>::value,
+          "Mma operator A element must match input A type!");
 
   /// Iterates over the B operand in memory
   using IteratorB = MmaTensorOpMultiplicandTileIterator<
@@ -322,7 +321,7 @@ public:
   CUTLASS_DEVICE
   void operator()(
     FragmentC &D, 
-    TransformedFragmentA const &A, 
+    FragmentA const &A, 
     TransformedFragmentB const &B, 
     FragmentC const &C
   ) const {
@@ -409,44 +408,14 @@ public:
 
   /// Transform the mma operands to the required types
   CUTLASS_DEVICE
-  void transform(TransformedFragmentA &dst_A, TransformedFragmentB &dst_B,
-                 FragmentA const &A, FragmentB const &B,
+  void transform(TransformedFragmentB &dst_B, FragmentB const &B,
                  FragmentQScale const &scales,
                  FragmentQOffset const &offsets) const {
-
-    //
-    // Define conversions from source type to instruction type
-    //
-    FloatRoundStyle const kRoundA =
-        PreferredRoundingMode<typename ArchMmaOperator::ElementA,
-                              ElementA>::kRound;
 
     Array<uint8_t, FragmentB::kElements * 2> const *ptr_B =
         reinterpret_cast<Array<uint8_t, FragmentB::kElements * 2> const *>(&B);
     IteratorQScale::dequant(scales, offsets, *ptr_B, dst_B);
 
-    #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
-      internal::ConvertAndPack<typename ArchMmaOperator::ElementA, ElementA,
-                            FragmentA::kElements, kRoundA>
-          convert_A;
-  
-      dst_A = convert_A(A);
-
-    #elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-      internal::ConvertAndPack<typename ArchMmaOperator::ElementA, ElementA,
-                            FragmentA::kElements / 2, kRoundA>
-          convert_A;
-      Array<ElementA, FragmentA::kElements / 2> const *ptr_A =
-          reinterpret_cast<Array<ElementA, FragmentA::kElements / 2> const *>(&A);
-      Array<typename ArchMmaOperator::ElementA, FragmentA::kElements / 2> *
-          ptr_dst_A = reinterpret_cast<Array<typename ArchMmaOperator::ElementA,
-                                             FragmentA::kElements / 2> *>(&dst_A);
-    
-      ptr_dst_A[0] = convert_A(ptr_A[0]);
-      ptr_dst_A[1] = convert_A(ptr_A[1]);
-    #else
-      assert(0);
-    #endif
   }
 };
 
