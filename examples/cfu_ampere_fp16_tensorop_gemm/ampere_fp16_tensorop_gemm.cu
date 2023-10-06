@@ -486,9 +486,12 @@ int run(Options &options) {
           for (int thread_id = 0; thread_id < 4; thread_id++){
             const int dst_idx = row_blk + thread_id * 4;
             const int src_idx = row_blk + thread_id * 2;
+            // [a, b, c, d] => [a, c, b, d] so that adjacent weights are in their own
+            // 16b element: [a, x, b, x] and [x, c, x, d], which makes it easier to
+            // convert to fp16x2 format in a b32 register
             tensor_offset_prepacked.at({dst_idx + 0, col}) = tensor_offset.at({src_idx + 0, col});
-            tensor_offset_prepacked.at({dst_idx + 1, col}) = tensor_offset.at({src_idx + 1, col});
-            tensor_offset_prepacked.at({dst_idx + 2, col}) = tensor_offset.at({src_idx + 8, col});
+            tensor_offset_prepacked.at({dst_idx + 1, col}) = tensor_offset.at({src_idx + 8, col});
+            tensor_offset_prepacked.at({dst_idx + 2, col}) = tensor_offset.at({src_idx + 1, col});
             tensor_offset_prepacked.at({dst_idx + 3, col}) = tensor_offset.at({src_idx + 9, col});
           }
         }

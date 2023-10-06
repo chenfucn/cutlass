@@ -20,10 +20,43 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 
+namespace{
+
+struct b32_pair{
+  uint32_t a;
+  uint32_t b;
+};
+
+struct fp16_quard{
+  cutlass::half_t a;
+  cutlass::half_t b;
+  cutlass::half_t c;
+  cutlass::half_t d;
+};
+
+struct b16_quard{
+  int16_t a;
+  int16_t b;
+  int16_t c;
+  int16_t d;
+};
+
+union b64 {
+  uint64_t single;
+  b32_pair pair;
+  b16_quard quard;
+  fp16_quard fp16_quard;
+};
+
+static_assert(sizeof(b64) == 8, "b64 should be 64 bits");
+
+} // namespace
+
+////////////////////////////////////////////////////////////////////////////////
+
 namespace cutlass {
 namespace gemm {
 namespace warp {
-
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -362,51 +395,90 @@ public:
       //    2 B operand tiles per mma (kBTilesPerMma == 2)
       //    (1,n) quantization blocking
 
-      ElementScale* dest_ptr = dest.data();
+      b64* dest_ptr = reinterpret_cast<b64*>(dest.data());
       const uint8_t* weights_ptr = weights.data();
-      const ElementScale* scales_ptr = scales.data();
+      const b64* scales_ptr = reinterpret_cast<const b64*>(scales.data());
       const ElementOffset* offsets_ptr = nullptr;
       if constexpr(kHasOffset) { offsets_ptr = offsets.data(); }
 
       CUTLASS_PRAGMA_UNROLL
       for (int n_idx = 0; n_idx < kMmaIterations; n_idx++){
-        int16_t offset0;
-        int16_t offset1;
-        int16_t offset2;
-        int16_t offset3;
+        // dequantize: d = scale * (weight - offset)
+        // to use FMA, d = scale * weight + (scale * (-offset))
+
+        // TODO, add if constexpr branch for bf16
+        static_assert(std::is_same<ElementScale, cutlass::half_t>::value, "bitwise hack only support fp16.");
+
+        b64 offsets;
         if constexpr(kHasOffset){
-          offset0 = int16_t(offsets_ptr[0]);
-          offset1 = int16_t(offsets_ptr[1]);
-          offset2 = int16_t(offsets_ptr[2]);
-          offset3 = int16_t(offsets_ptr[3]);
+          const uint32_t* p = reinterpret_cast<const uint32_t*>(offsets_ptr);
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
+          asm volatile(
+              "{\n\t"
+              "  .reg  .b32    rb0, rb1;\n"      // b32 regs for fp16x2 mul operands
+              "  .reg  .b32    rtmp0, rtmp1;\n"  // temp regs
+
+              // static_cast<cutlass::half_t>(-16 - offset)
+              // input [d, b, c, a],
+              "  shl.b32       rb0, %4, 6;\n"     // rb0 = [x, b, x, a] << 6
+              "  shr.u32       rb1, %4, 2;\n"     // rb1 = [x, d, x, c] << 6
+              "  lop3.b32      rb0, rb0, 0x03c003c0, 0xcc00cc00, 0xea;\n" // a & 0x03c0 | 0xcc00
+              "  lop3.b32      rb1, rb1, 0x03c003c0, 0xcc00cc00, 0xea;\n"
+              "  mul.rn.f16x2  %0, %2, rb0;\n"    // dest = scale * (16 + weight)
+              "  mul.rn.f16x2  %1, %3, rb1;\n"
+              "}\n"
+              : "=r"(offsets.pair.a), "=r"(offsets.pair.b)
+              : "r"(scales_ptr->pair.a), "r"(scales_ptr->pair.b),
+                "r"(p[0]));
+#else
+          assert(0);
+#endif
+
           offsets_ptr += 4;
         } else {
-          offset0 = 8;
-          offset1 = 8;
-          offset2 = 8;
-          offset3 = 8;
+          offsets.fp16_quard.a = scales_ptr->fp16_quard.a * static_cast<cutlass::half_t>(-16-8);
+          offsets.fp16_quard.b = scales_ptr->fp16_quard.b * static_cast<cutlass::half_t>(-16-8);
+          offsets.fp16_quard.c = scales_ptr->fp16_quard.c * static_cast<cutlass::half_t>(-16-8);
+          offsets.fp16_quard.d = scales_ptr->fp16_quard.d * static_cast<cutlass::half_t>(-16-8);
         }
-        ElementScale s0 = scales_ptr[0];
-        ElementScale s1 = scales_ptr[1];
-        ElementScale s2 = scales_ptr[2];
-        ElementScale s3 = scales_ptr[3];
-        scales_ptr += 4;
 
         for (int n_r = 0; n_r < kNRepeats; n_r++){
-          auto w_pair0 = weights_ptr[0];
-          auto w_pair1 = weights_ptr[1];
-          weights_ptr+=2;
+          const uint16_t* w_quard = reinterpret_cast<const uint16_t*>(weights_ptr);
+          weights_ptr += 2;
 
-          uint8_t w0 = w_pair0 & 0x0f;
-          uint8_t w1 = w_pair0 >> 4;
-          uint8_t w2 = w_pair1 & 0x0f;
-          uint8_t w3 = w_pair1 >> 4 ;
-          dest_ptr[0] = ElementScale(s0 * (w0 - offset0));
-          dest_ptr[1] = ElementScale(s1 * (w1 - offset1));
-          dest_ptr[2] = ElementScale(s2 * (w2 - offset2));
-          dest_ptr[3] = ElementScale(s3 * (w3 - offset3));
-          dest_ptr += 4;
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
+          asm volatile(
+              "{\n\t"
+              "  .reg   .b32   tmp0, tmp1, tmp2, tmp3;\n"
+
+              // compute static_cast<cutlass::half_t>(16 + weight)
+              "  cvt.u32.u16   tmp1, %6;\n"
+              "  shl.b32       tmp0, tmp1, 6;\n"
+              "  shr.b32       tmp1, tmp1, 2;\n"
+              "  shl.b32       tmp2, tmp0, 12;\n"
+              "  shl.b32       tmp3, tmp1, 12;\n"
+              "  or.b32        tmp0, tmp0, tmp2;\n"
+              "  or.b32        tmp1, tmp1, tmp3;\n"
+              // b = a & 0x03c003c0 | 0x4c004c00
+              "  lop3.b32      tmp0, tmp0, 0x03c003c0, 0x4c004c00, 0xea;\n"
+              "  lop3.b32      tmp1, tmp1, 0x03c003c0, 0x4c004c00, 0xea;\n"
+
+              // dest = scale * (16 + weight) +  (scale * (-16 - offset))
+              "  fma.rn.f16x2  %0, %2, tmp0, %4;\n"
+              "  fma.rn.f16x2  %1, %3, tmp1, %5;\n"
+              "}\n"
+              : "=r"(dest_ptr->pair.a), "=r"(dest_ptr->pair.b)
+              : "r"(scales_ptr->pair.a), "r"(scales_ptr->pair.b),
+                "r"(offsets.pair.a), "r"(offsets.pair.b),
+                "h"(w_quard[0]));
+#else
+          assert(0);
+#endif
+          dest_ptr++;
         }
+
+        scales_ptr++;
       }
 
     } else {
