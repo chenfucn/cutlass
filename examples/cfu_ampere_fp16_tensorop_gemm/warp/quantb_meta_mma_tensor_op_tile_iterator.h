@@ -50,6 +50,46 @@ union b64 {
 
 static_assert(sizeof(b64) == 8, "b64 should be 64 bits");
 
+/// Convert packed 4b weights into fp16(weight + 16)
+/// Current bit hacking only supports fp16, need to add bf16 later.
+///
+template<int Size>
+CUTLASS_DEVICE
+void weights2Half(cutlass::Array<uint8_t,Size/2> const &weights,
+                 cutlass::Array<cutlass::half_t, Size>& dest)
+{
+  static_assert(Size % 8 == 0, "Weights should have been prepacked by 2x2 tiles, 2 weights per tile.");
+  uint32_t* dest_pair = reinterpret_cast<uint32_t*>(dest.data());
+  const uint32_t* w_oct = reinterpret_cast<const uint32_t*>(weights.data());
+
+  CUTLASS_PRAGMA_UNROLL
+  for (int oct_idx = 0; oct_idx < Size/8; oct_idx++, w_oct++, dest_pair += 4){
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
+
+    // static_cast<cutlass::half_t>(16 + weight)
+    // 4b weights are prepacked into [0, 2, 4, 6, 1, 3, 5, 7], so that adjacent weights
+    // are in different 16b half words, making it easier to convert to fp16.
+    asm volatile(
+        "{\n\t"
+        "  shl.b32       %0, %4, 6;\n"
+        "  shl.b32       %1, %4, 2;\n"
+        "  shr.u32       %2, %4, 2;\n"
+        "  shr.u32       %3, %4, 6;\n"
+        "  lop3.b32      %0, %0, 0x03c003c0, 0x4c004c00, 0xea;\n" // a & 0x03c0 | 0xcc00
+        "  lop3.b32      %1, %1, 0x03c003c0, 0x4c004c00, 0xea;\n"
+        "  lop3.b32      %2, %2, 0x03c003c0, 0x4c004c00, 0xea;\n"
+        "  lop3.b32      %3, %3, 0x03c003c0, 0x4c004c00, 0xea;\n"
+        "}\n"
+        : "=r"(dest_pair[0]), "=r"(dest_pair[1]),
+          "=r"(dest_pair[2]), "=r"(dest_pair[3])
+        : "r"(*w_oct));
+#else
+    assert(0);
+#endif
+  }
+
+}
+
 } // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -386,17 +426,18 @@ public:
                       Array<uint8_t,kExpandedSize/2> const &weights,
                       Array<ElementScale, kExpandedSize>& dest){
     static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm.");
+    static_assert(kExpandedSize % 8 == 0, "Weights should have been prepacked by 2x2 tiles, 2 weights per tile.");
 
-    if constexpr(kNumBsPerCoreTileFragement == 2
-                 && kBTilesPerMma == 2
+    // First convert 4b weight into fp16(weight + 16)
+    weights2Half(weights, dest);
+
+    if constexpr(kBTilesPerMma == 2
                  && BlockingShape::kRow == 1){
       // Optimize for a special case of:
-      //    16b gemm (kNumBsPerCoreTileFragement == 2)
       //    2 B operand tiles per mma (kBTilesPerMma == 2)
       //    (1,n) quantization blocking
 
-      b64* dest_ptr = reinterpret_cast<b64*>(dest.data());
-      const uint8_t* weights_ptr = weights.data();
+      uint32_t* dest_pair = reinterpret_cast<uint32_t*>(dest.data());
       const b64* scales_ptr = reinterpret_cast<const b64*>(scales.data());
       const ElementOffset* offsets_ptr = nullptr;
       if constexpr(kHasOffset) { offsets_ptr = offsets.data(); }
@@ -406,9 +447,6 @@ public:
         // dequantize: d = scale * (weight - offset)
         // to use FMA, d = scale * weight + (scale * (-offset))
 
-        // TODO, add if constexpr branch for bf16
-        static_assert(std::is_same<ElementScale, cutlass::half_t>::value, "bitwise hack only support fp16.");
-
         b64 offsets;
         if constexpr(kHasOffset){
           const uint32_t* p = reinterpret_cast<const uint32_t*>(offsets_ptr);
@@ -417,7 +455,6 @@ public:
           asm volatile(
               "{\n\t"
               "  .reg  .b32    rb0, rb1;\n"      // b32 regs for fp16x2 mul operands
-              "  .reg  .b32    rtmp0, rtmp1;\n"  // temp regs
 
               // static_cast<cutlass::half_t>(-16 - offset)
               // input [d, b, c, a],
@@ -443,48 +480,29 @@ public:
           offsets.fp16_quard.d = scales_ptr->fp16_quard.d * static_cast<cutlass::half_t>(-16-8);
         }
 
+        CUTLASS_PRAGMA_UNROLL
         for (int n_r = 0; n_r < kNRepeats; n_r++){
-          const uint16_t* w_quard = reinterpret_cast<const uint16_t*>(weights_ptr);
-          weights_ptr += 2;
-
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
           asm volatile(
               "{\n\t"
-              "  .reg   .b32   tmp0, tmp1, tmp2, tmp3;\n"
-
-              // compute static_cast<cutlass::half_t>(16 + weight)
-              "  cvt.u32.u16   tmp1, %6;\n"
-              "  shl.b32       tmp0, tmp1, 6;\n"
-              "  shr.b32       tmp1, tmp1, 2;\n"
-              "  shl.b32       tmp2, tmp0, 12;\n"
-              "  shl.b32       tmp3, tmp1, 12;\n"
-              "  or.b32        tmp0, tmp0, tmp2;\n"
-              "  or.b32        tmp1, tmp1, tmp3;\n"
-              // b = a & 0x03c003c0 | 0x4c004c00
-              "  lop3.b32      tmp0, tmp0, 0x03c003c0, 0x4c004c00, 0xea;\n"
-              "  lop3.b32      tmp1, tmp1, 0x03c003c0, 0x4c004c00, 0xea;\n"
-
-              // dest = scale * (16 + weight) +  (scale * (-16 - offset))
-              "  fma.rn.f16x2  %0, %2, tmp0, %4;\n"
-              "  fma.rn.f16x2  %1, %3, tmp1, %5;\n"
+              "  fma.rn.f16x2  %0, %2, %0, %4;\n" // dest = scale * (16 + weight) +  (scale * (-16 - offset))
+              "  fma.rn.f16x2  %1, %3, %1, %5;\n"
               "}\n"
-              : "=r"(dest_ptr->pair.a), "=r"(dest_ptr->pair.b)
+              : "+r"(dest_pair[0]), "+r"(dest_pair[1])
               : "r"(scales_ptr->pair.a), "r"(scales_ptr->pair.b),
-                "r"(offsets.pair.a), "r"(offsets.pair.b),
-                "h"(w_quard[0]));
+                "r"(offsets.pair.a), "r"(offsets.pair.b));
 #else
           assert(0);
 #endif
-          dest_ptr++;
+          dest_pair += 2;
         }
-
         scales_ptr++;
       }
 
     } else {
-      // unoptiomized path for other cases
+      // unoptiomized path for other cases, very slow
       int out_idx = 0;
-      int offset = 8;
+      ElementScale offset;
       CUTLASS_PRAGMA_UNROLL
       for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
         int n_idx = n_out / kNRepeats;
@@ -497,15 +515,11 @@ public:
             int idx = elem_idx + mma_tile_idx * kCoreTileFragementSize + n_idx * kCoreTileFragementSize * kTilesPerMma;
             ElementScale s = scales[idx];
             if constexpr(kHasOffset){
-              offset = offsets[idx];
-            }
-            int w;
-            if (out_idx % 2 == 0){
-              w = weights[out_idx/2] & 0x0f;
+              offset = s * static_cast<ElementScale>(-16 - int(offsets[idx]));
             } else {
-              w = weights[out_idx/2] >> 4;
+              offset = s * static_cast<ElementScale>(-16-8);
             }
-            dest[out_idx] = ElementScale(s * (w - offset));
+            dest[out_idx] = s * dest[out_idx] + offset;
             out_idx++;
           }
         }
@@ -704,24 +718,23 @@ public:
     static_assert(kNRepeats == 1, "This is implied by BlockingShape::kColumn == 1");
     static_assert(kNumBsPerCoreTileFragement == 2, "Only for 16b gemm now.");
 
+    // First convert 4b weight into fp16(weight + 16)
+    weights2Half(weights, dest);
+
     int out_idx = 0;
     CUTLASS_PRAGMA_UNROLL
     for (int n_out = 0; n_out < kMmaIterationsB; n_out++){
-      int offset;
-      if constexpr(kHasOffset){
-        offset = offsets[n_out];
-      } else {
-        offset = 8;
-      }
       ElementScale s = scales[n_out];
+      ElementScale offset;
+      if constexpr(kHasOffset){
+        offset = s * static_cast<ElementScale>(-16 - int(offsets[n_out]));
+      } else {
+        offset = s * static_cast<ElementScale>(-16-8);
+      }
       CUTLASS_PRAGMA_UNROLL
       for (int mma_tile_out_idx = 0; mma_tile_out_idx < kBTilesPerMma; mma_tile_out_idx++){
-        // We take advantage of the fact that kNumBsPerCoreTileFragement == 2 to extract
-        // 2 int4 weights out of a bytes. Valid for all 16b GEMM.
-        int w1 = weights[out_idx/2] & 0x0f;
-        int w2 = weights[out_idx/2] >> 4;
-        dest[out_idx] = ElementScale(s * (w1 - offset));
-        dest[out_idx + 1] = ElementScale(s * (w2 - offset));
+        dest[out_idx] = s * dest[out_idx] + offset;
+        dest[out_idx + 1] = s * dest[out_idx + 1] + offset;
         out_idx += 2;
       }
     }

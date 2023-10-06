@@ -1100,35 +1100,18 @@ public:
         );
       }
 
-      // Except for the last warp-tile, all warp-tiles issue their share of
-      // global->shared fragment copies
-      if (warp_mma_k < Base::kWarpGemmIterations - 1) {
-        copy_tiles_and_advance(
-            iterator_A,
-            iterator_B,
-            iterator_QScale,
-            iterator_QOffset,
-            warp_mma_k);
-      }
-
-      // The second-to-last warp-tile also:
-      //   - performs the last warp-tile's share of global->shared fragment copies
-      //   - moves to the next global fetch stage
-      if (warp_mma_k + 2 == Base::kWarpGemmIterations) {
-
-        // Performs the last warp-tile's share of global->shared fragment copies
-        copy_tiles_and_advance(
+      // All warp-tiles issue their share of global->shared fragment copies
+      copy_tiles_and_advance(
           iterator_A,
           iterator_B,
           iterator_QScale,
           iterator_QOffset,
-          warp_mma_k + 1);
+          (warp_mma_k + 1) % Base::kWarpGemmIterations);
 
+      // The second-to-last warp-tile also moves to the next global fetch stage
+      if (warp_mma_k + 2 == Base::kWarpGemmIterations) {
         // Inserts a memory fence between stages of cp.async instructions.
         cutlass::arch::cp_async_fence();
-
-        // Wait until we have at least one completed global fetch stage
-        gmem_wait();
 
         // Move to the next global fetch stage
         advance_smem_write_stage(iterator_A, iterator_B, iterator_QScale, iterator_QOffset);
@@ -1146,6 +1129,9 @@ public:
             iterator_QOffset.clear_mask(gemm_k_iterations == 0);
           }
         }
+
+        // Wait until we have at least one completed global fetch stage
+        gmem_wait();
       }
 
     }
@@ -1191,6 +1177,13 @@ public:
     this->warp_tile_iterator_A_.set_kgroup_index(0);
     this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[0]);
     ++this->warp_tile_iterator_A_;
+
+    copy_tiles_and_advance(
+        iterator_A,
+        iterator_B,
+        iterator_QScale,
+        iterator_QOffset,
+        0);
 
     if constexpr(debug_layout){
       if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0){

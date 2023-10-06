@@ -104,7 +104,7 @@ struct Options {
   
   Options():
     help(false),
-    problem_size({1, 8192, 8192}),
+    problem_size({2048, 8192, 28672}),
     batch_count(1),
     reference_check(true),
     iterations(200),
@@ -206,9 +206,9 @@ using SmArch = cutlass::arch::Sm80;
 
 // This code section describes the tile size a thread block will compute
 using ShapeMMAThreadBlock =
-    cutlass::gemm::GemmShape<64, 128, 64>; // <64, 128, 64>
+    cutlass::gemm::GemmShape<128, 256, 64>; // <64, 128, 64>
 // This code section describes tile size a warp will compute
-using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 32, 64>; // <64, 32, 64>
+using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 64>; // <64, 32, 64>
 // This code section describes the size of MMA op
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;
 
@@ -415,10 +415,20 @@ int run(Options &options) {
         for (int row = 0; row < 4; ++row) {
           auto cord = cutlass::make_Coord(row, col);
           auto packed_cord = packed_tile_base + cutlass::make_Coord(row * 4, col); // packed tile is 16x8
-          tensor_weight_prepacked.at(packed_cord) = tensor_weight.at(dtile_base + t0_base + cord);
-          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(1, 0)) = tensor_weight.at(dtile_base + t1_base + cord);
-          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(2, 0)) = tensor_weight.at(dtile_base + t2_base + cord);
-          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(3, 0)) = tensor_weight.at(dtile_base + t3_base + cord);
+          uint8_t buf[4];
+          buf[0] = tensor_weight.at(dtile_base + t0_base + cord);
+          buf[1] = tensor_weight.at(dtile_base + t1_base + cord);
+          buf[2] = tensor_weight.at(dtile_base + t2_base + cord);
+          buf[3] = tensor_weight.at(dtile_base + t3_base + cord);
+          
+          // [0, 1, 2, 3, 4, 5, 6, 7] => [0, 2, 4, 6, 1, 3, 5, 7] so that each pair of adjacent weights
+          // are in different b16 register at the same positions. This makes it easier to convert to
+          // fp16x2 format in a b32 register
+
+          tensor_weight_prepacked.at(packed_cord) = (buf[0] & 0x0f) | ((buf[1] & 0x0f) << 4);
+          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(1, 0)) = (buf[2] & 0x0f) | ((buf[3] & 0x0f) << 4);
+          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(2, 0)) = ((buf[0] & 0xf0) >> 4) | (buf[1] & 0xf0);
+          tensor_weight_prepacked.at(packed_cord + cutlass::make_Coord(3, 0)) = ((buf[2] & 0xf0) >> 4) | (buf[3] & 0xf0);
         }
       }
     }
@@ -735,6 +745,9 @@ int main(int argc, const char **argv) {
     std::cerr << "cudaGetDeviceProperties() returned an error: " << cudaGetErrorString(error) << std::endl;
     return -1;
   }
+
+  std::cout << "Device: " << props.name << " with " << props.multiProcessorCount << " SMs" << std::endl;
+  std::cout << "Device compute capability: " << props.major << "." << props.minor << std::endl;
 
   if (!((props.major * 10 + props.minor) >= 80)) {
     std::cerr << "Ampere Tensor Core operations must be run on a machine with compute capability at least 80."

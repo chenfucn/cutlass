@@ -455,6 +455,8 @@ public:
                                     smem_size);
 
       if (result != cudaSuccess) {
+        std::cerr << "Failed to obtain maximum shared memory size " << smem_size << " for kernel: "
+                  << cudaGetErrorString(result) << "\n";
         return Status::kErrorInternal;
       }
     }
