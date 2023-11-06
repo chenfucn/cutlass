@@ -31,6 +31,8 @@ include_directories(
   .
 )
 
+include_directories(./gsl-src/include)
+
 cutlass_example_add_executable(
   cfu_ampere_fp16_tensorop_gemm
   ampere_fp16_tensorop_gemm.cu

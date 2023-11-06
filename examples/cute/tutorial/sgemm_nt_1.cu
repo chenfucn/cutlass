@@ -39,6 +39,8 @@
 #  include "cutlass/util/cublas_wrappers.hpp"
 #endif
 #include "cutlass/util/helper_cuda.hpp"
+#include "cutlass/util/debug.h"
+#include "cutlass/detail/dependent_false.hpp"
 
 template <class MShape, class NShape, class KShape,
           class TA, class AStride, class ABlockLayout, class AThreadLayout,
@@ -125,7 +127,7 @@ gemm_device(MShape M, NShape N, KShape K,
   // Clear the accumulators
   clear(tCrC);
 
-#if 0
+#if 1
   if(thread0()) {
     print("mA\n");
     print(mA.shape()); print("\n"); print(mA.stride());
@@ -157,7 +159,7 @@ gemm_device(MShape M, NShape N, KShape K,
   }
 #endif
 
-#if 0
+#if 1
   if(thread0()) {
     print("mC\n");
     print(mC.shape()); print("\n"); print(mC.stride());
@@ -371,19 +373,19 @@ void test_gemm(int m, int n, int k)
   CUTE_CHECK_LAST();
   thrust::host_vector<TC> cute_result = d_C;
 
-  // Timing iterations
-  timer.start();
-  for (int i = 0; i < timing_iterations; ++i) {
-    gemm(m, n, k,
-         alpha,
-         d_A.data().get(), m,
-         d_B.data().get(), n,
-         beta,
-         d_C.data().get(), m);
-  }
-  double cute_time = timer.seconds() / timing_iterations;
-  CUTE_CHECK_LAST();
-  printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
+  // // Timing iterations
+  // timer.start();
+  // for (int i = 0; i < timing_iterations; ++i) {
+  //   gemm(m, n, k,
+  //        alpha,
+  //        d_A.data().get(), m,
+  //        d_B.data().get(), n,
+  //        beta,
+  //        d_C.data().get(), m);
+  // }
+  // double cute_time = timer.seconds() / timing_iterations;
+  // CUTE_CHECK_LAST();
+  // printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
 
 #if defined(CUTLASS_ENABLE_CUBLAS) && CUTLASS_ENABLE_CUBLAS != 0
   printf("Empirical Perf: %.1f%%\n", (cublas_time / cute_time) * 100);
@@ -406,9 +408,114 @@ void test_gemm(int m, int n, int k)
 }
 
 
+// namespace cute::GMMA{
+
+// enum class Major {
+//   K  = 0,
+//   MN = 1
+// };
+// }
+
+template <cute::GMMA::Major Value>
+struct DValue {};
+
+namespace de {
+  using namespace cute;
+
+template <GMMA::Major major, class ElementType, class BLK_MN, class BLK_K, const bool is_ws_transposed_B = false>
+constexpr auto
+rs_smem_selector() {
+  auto BLK_MN0 = size<0>(BLK_MN{});
+  auto BLK_K0  = size<0>(BLK_K{});
+
+  static_assert(BLK_MN0 % 8 == 0, "BLK_MN0 must be a multiple of 8.");
+  static_assert(BLK_K0 % 8 == 0,  "BLK_K0 must be a multiple of 8.");
+  if constexpr (major == GMMA::Major::MN) {
+    if constexpr (sizeof(ElementType) == 4){
+      if constexpr (is_ws_transposed_B) {
+        // only optimized transpositionB(SW32 and SW128 for tf32) can be used, but prefer SW32 due to free bank conflict
+        if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW32_Atom<ElementType>{}) == 0) {
+          return GMMA::Layout_MN_SW32_Atom<ElementType>{};
+        }
+        else {
+          static_assert(BLK_MN0 % size<0>(GMMA::Layout_MN_SW32_Atom<ElementType>{}) == 0,
+                       "BLK_MN0 must be a multiple of size<0>(GMMA::Layout_MN_SW32_Atom<ElementType>{})");
+        }
+      }
+      else {
+        // Fall into SW32 due to free bank conflict
+        if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW32_Atom<ElementType>{}) == 0) {
+          return GMMA::Layout_MN_SW32_Atom<ElementType>{};
+        }
+        else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<ElementType>{}) == 0) {
+          return GMMA::Layout_MN_INTER_Atom<ElementType>{};
+        }
+        else {
+          static_assert(BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<ElementType>{}) == 0,
+                       "BLK_MN0 must be a multiple of size<0>(GMMA::Layout_MN_INTER_Atom<ElementType>{})");
+        }
+      }
+    }
+    // Used for int8, fp8, fp16 and bf16 I/O kernels
+    else if constexpr (sizeof(ElementType) == 1 || sizeof(ElementType) == 2) {
+      if constexpr (sizeof(ElementType) == 1 && is_ws_transposed_B) {
+        // Only optimized transpositionB (SW32 for int8 and fp8) can be used
+        if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW128_Atom<ElementType>{}) == 0) {
+          return GMMA::Layout_MN_SW128_Atom<ElementType>{};
+        }
+        else {
+          static_assert(BLK_MN0 % size<0>(GMMA::Layout_MN_SW128_Atom<ElementType>{}) == 0,
+                       "BLK_MN0 must be a multiple of size<0>(GMMA::Layout_MN_128_Atom<ElementType>{})");
+        }
+      }
+      else {
+        if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW128_Atom<ElementType>{}) == 0) {
+          return GMMA::Layout_MN_SW128_Atom<ElementType>{};
+        }
+        else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW64_Atom<ElementType>{}) == 0) {
+          return GMMA::Layout_MN_SW64_Atom<ElementType>{};
+        }
+        else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW32_Atom<ElementType>{}) == 0) {
+          return GMMA::Layout_MN_SW32_Atom<ElementType>{};
+        }
+        else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<ElementType>{}) == 0) {
+          return GMMA::Layout_MN_INTER_Atom<ElementType>{};
+        }
+        else {
+          static_assert(BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<ElementType>{}) == 0,
+                       "BLK_MN0 must be a multiple of size<0>(GMMA::Layout_MN_INTER_Atom<ElementType>{})");
+        }
+      }
+    }
+    else {
+      static_assert(cutlass::detail::dependent_false<ElementType>, "Smem selector does not support this element type");
+    }
+  }
+  else if constexpr (major == GMMA::Major::K) {
+    if constexpr (BLK_K0 % size<1>(GMMA::Layout_K_SW128_Atom<ElementType>{}) == 0) {
+      return GMMA::Layout_K_SW128_Atom<ElementType>{};
+    }
+    else if constexpr (BLK_K0 % size<1>(GMMA::Layout_K_SW64_Atom<ElementType>{}) == 0) {
+      return GMMA::Layout_K_SW64_Atom<ElementType>{};
+    }
+    else if constexpr (BLK_K0 % size<1>(GMMA::Layout_K_SW32_Atom<ElementType>{}) == 0) {
+      return GMMA::Layout_K_SW32_Atom<ElementType>{};
+    }
+    else if constexpr (BLK_K0 % size<1>(GMMA::Layout_K_INTER_Atom<ElementType>{}) == 0) {
+      return GMMA::Layout_K_INTER_Atom<ElementType>{};
+    }
+    else {
+      static_assert(BLK_K0 % size<1>(GMMA::Layout_K_INTER_Atom<ElementType>{}) == 0,
+                    "BLK_K0 must be a multiple of size<1>(GMMA::Layout_K_INTER_Atom<ElementType>{})");
+    }
+  }
+}
+
+}
+
 int main(int argc, char** argv)
 {
-  int m = 5120;
+  int m = 3072;
   if (argc >= 2)
     sscanf(argv[1], "%d", &m);
 
@@ -420,7 +527,17 @@ int main(int argc, char** argv)
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
-  test_gemm(m, n, k);
+  //test_gemm(m, n, k);
+
+  {
+
+    using namespace cute;
+    using SmemLayoutAtomA = decltype(de::rs_smem_selector<cute::GMMA::Major::K, cutlass::half_t,
+      cute::Int<128>, cute::Int<64>>());
+    SmemLayoutAtomA smem_layout_atom_a;
+    print(smem_layout_atom_a);
+
+  }
 
   return 0;
 }
