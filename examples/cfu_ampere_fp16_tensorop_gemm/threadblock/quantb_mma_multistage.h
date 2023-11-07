@@ -79,11 +79,35 @@ struct QuantBLayoutDebug{
       if (block_id == 1 && warp_id == 0){
         const Element* ptr = reinterpret_cast<const Element*>(&frag);
         for (int i = 0; i < Size/4; i++, ptr+=4){
-          printf("T%.2d%c%d, %.3f, %.3f, %.3f, %.3f\n", threadIdx.x, label, i, float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
+          if constexpr(std::is_integral<Element>::value){
+            printf("T%.2d%c%d, %3d, %3d, %3d, %3d\n",
+                   threadIdx.x, label, i,
+                   ptr[0], ptr[1], ptr[2], ptr[3]);
+          } else {
+            printf("T%.2d%c%d, %.3f, %.3f, %.3f, %.3f\n",
+                   threadIdx.x, label, i,
+                   float(ptr[0]), float(ptr[1]), float(ptr[2]), float(ptr[3]));
+          }
         }
       }
     }
   }
+
+  template<typename Element, int Size>
+  CUTLASS_DEVICE
+  static void print_as_int4(cutlass::Array<Element, Size> const& frag, char label, int block_id, int warp_id, int lane_id){
+    constexpr int I8Size = Size * cutlass::sizeof_bits<Element>::value / 8;
+    static_assert(I8Size % 2 == 0, "Size must be multiple of 4");
+    if constexpr (debug_fragment){
+      if (block_id == 1 && warp_id == 0){
+        const uint8_t* ptr = reinterpret_cast<const uint8_t*>(&frag);
+        for (int i = 0; i < I8Size/2; i++, ptr+=2){
+          printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
+        }
+      }
+    }
+  }
+
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1049,20 +1073,13 @@ public:
         ++this->warp_tile_iterator_A_;
 
         if constexpr(debug_layout){
-          if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0){
-            if (layout_debug_.lane_id_ == 0) {
-              printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, warp_mma_k % Base::kWarpGemmIterations);
-            }
-            {
-              uint8_t* ptr = reinterpret_cast<uint8_t*>(&(pipe_state.warp_loaded_frag_B_));
-              for (int i = 0; i < 16/2; i++, ptr+=2){
-                printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
-              }
-            }
-            LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-            if constexpr(kHasQOffset){
-              LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-            }
+          if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
+            printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, warp_mma_k % Base::kWarpGemmIterations);
+          }
+          LayoutDebugType::print_as_int4(pipe_state.warp_loaded_frag_B_, 'W', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+          if constexpr(kHasQOffset){
+            LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
           }
         }
 
@@ -1186,24 +1203,16 @@ public:
         0);
 
     if constexpr(debug_layout){
-      if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0){
-        if (layout_debug_.lane_id_ == 0) {
-          printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, 0);
-        }
-        {
-          uint8_t* ptr = reinterpret_cast<uint8_t*>(&(pipe_state.warp_loaded_frag_B_));
-          for (int i = 0; i < 16/2; i++, ptr+=2){
-            printf("T%.2dW%d, %d, %d, %d, %d\n", threadIdx.x, i, ptr[0] & 0x0f, ptr[0] >> 4, ptr[1] & 0x0f, ptr[1] >> 4);
-          }
-        }
-        LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-        if constexpr(kHasQOffset){
-          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-        }
+      if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
+        printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, 0);
+      }
+      LayoutDebugType::print_as_int4(pipe_state.warp_loaded_frag_B_, 'W', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+      LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+      if constexpr(kHasQOffset){
+        LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
       }
     }
 
-    // Transform, if necessary, the first warp-tile's shared memory fragments
     warp_mma_.transform(
       pipe_state.warp_transformed_frag_B_[0],
       pipe_state.warp_loaded_frag_B_,

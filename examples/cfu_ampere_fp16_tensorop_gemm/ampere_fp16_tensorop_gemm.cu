@@ -697,10 +697,10 @@ struct Options {
   
   Options():
     help(false),
-    problem_size({1024, 2048, 1024}),
+    problem_size({2048, 28672, 8192}),
     batch_count(1),
     reference_check(true),
-    iterations(200),
+    iterations(500),
     alpha(1),
     beta() { }
 
@@ -920,12 +920,12 @@ using MMAOp = cutlass::arch::OpClassTensorOp;
 // This code section describes CUDA SM architecture number
 using SmArch = cutlass::arch::Sm80;
 
-// This code section describes the tile size a thread block will compute
 using ShapeMMAThreadBlock =
-    cutlass::gemm::GemmShape<128, 256, 64>; // <64, 128, 64>
-// This code section describes tile size a warp will compute
-using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 64>; // <64, 32, 64>
-// This code section describes the size of MMA op
+    cutlass::gemm::GemmShape<128, 256, 64>;
+//    cutlass::gemm::GemmShape<16, 64, 64>;
+using ShapeMMAWarp = 
+      cutlass::gemm::GemmShape<64, 64, 64>;
+//    cutlass::gemm::GemmShape<16, 32, 64>;
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;
 
 // This code section describes how threadblocks are scheduled on GPU
@@ -1322,6 +1322,13 @@ int run(Options &options) {
 int main(int argc, const char **argv) {
   
   bool notSupported = false;
+
+  constexpr int deviceid = 4;
+  auto err = cudaSetDevice(deviceid);
+  if (err != cudaSuccess) {
+      std::cerr << "Failed to run on device #" << deviceid << cudaGetErrorString(err) << std::endl;
+      return -1;
+  }
 
   // Ampere Tensor Core operations exposed with mma.sync and ldmatrix are first available
   // in CUDA 11.0. 
