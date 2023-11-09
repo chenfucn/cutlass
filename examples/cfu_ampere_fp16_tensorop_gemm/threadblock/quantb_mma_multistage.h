@@ -1050,48 +1050,42 @@ public:
     // Unroll the warp-level MMA tiles of a threadblock's mainloop iteration
     CUTLASS_PRAGMA_UNROLL
     for (int warp_mma_k = 0; warp_mma_k < Base::kWarpGemmIterations; ++warp_mma_k) {
-
-      // Loading next warp-level tile from shared memory, only skip it if we
-      // are at the very last iteration.
-      // Things to consider: this is a really complex condition to evaluate,
-      // only brings 1% performance gain. Skipping this judgement does not
-      // affect correctness. Is there a way to add branch hint?
-      if ((gemm_k_iterations != (1 - Base::kStages)) || (warp_mma_k != (Base::kWarpGemmIterations - 1))) {
-        // Load the next warp-tile's B fragment from shared memory
-        this->warp_tile_iterator_QScale_.load(
-            pipe_state.warp_loaded_frag_QScale_,
-            pipe_state.warp_loaded_frag_QOffset_);
-        ++this->warp_tile_iterator_QScale_;
-
-        this->warp_tile_iterator_B_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
-        this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_);
-        ++this->warp_tile_iterator_B_;
-
-        // Load the next warp-tile's A fragment from shared memory
-        this->warp_tile_iterator_A_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
-        this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2]);
-        ++this->warp_tile_iterator_A_;
-
-        if constexpr(debug_layout){
-          if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
-            printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, warp_mma_k % Base::kWarpGemmIterations);
-          }
-          LayoutDebugType::print_as_int4(pipe_state.warp_loaded_frag_B_, 'W', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-          if constexpr(kHasQOffset){
-            LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-          }
-        }
-
-        warp_mma_.transform(
-          pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2],
-          pipe_state.warp_loaded_frag_B_,
+      // Loading next warp-level tiles from shared memory. This can be skipped on the very
+      // last iteration where:
+      //   (gemm_k_iterations == (1 - Base::kStages)) && (warp_mma_k == (Base::kWarpGemmIterations - 1))
+      // However, evaluating this condition seems more expensive than simply loading the tiles
+      this->warp_tile_iterator_QScale_.load(
           pipe_state.warp_loaded_frag_QScale_,
           pipe_state.warp_loaded_frag_QOffset_);
+      ++this->warp_tile_iterator_QScale_;
 
-        if constexpr(debug_layout){
-          LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[warp_mma_k % 2], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+      this->warp_tile_iterator_B_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
+      this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_);
+      ++this->warp_tile_iterator_B_;
+
+      this->warp_tile_iterator_A_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
+      this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2]);
+      ++this->warp_tile_iterator_A_;
+
+      if constexpr(debug_layout){
+        if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
+          printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, warp_mma_k % Base::kWarpGemmIterations);
         }
+        LayoutDebugType::print_as_int4(pipe_state.warp_loaded_frag_B_, 'W', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        if constexpr(kHasQOffset){
+          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        }
+      }
+
+      warp_mma_.transform(
+        pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2],
+        pipe_state.warp_loaded_frag_B_,
+        pipe_state.warp_loaded_frag_QScale_,
+        pipe_state.warp_loaded_frag_QOffset_);
+
+      if constexpr(debug_layout){
+        LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
       }
 
       // Execute the current warp-tile of MMA operations

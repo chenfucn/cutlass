@@ -1309,10 +1309,10 @@ int run(Options &options) {
     tensor_d.host_view(),
     tensor_ref_d.host_view());
 
-  if (passed) {
+  // if (passed) {
     std::cout << "Runtime: " << result.runtime_ms << " ms" << std::endl;
     std::cout << " GFLOPs: " << result.gflops << std::endl;
-  }
+  // }
 
   std::cout << (passed ? "Passed" : "Failed") << std::endl;
 
