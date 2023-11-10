@@ -99,8 +99,6 @@ template <
     /// Store the accumulators in row major or column major.  Row major is used
     /// when output layout is interleaved.
     bool AccumulatorsInRowMajor = false,
-    /// Use zfill or predicate for out-of-bound cp.async
-    SharedMemoryClearOption SharedMemoryClear = SharedMemoryClearOption::kNone,
     /// Gather operand A by using an index array
     bool GatherA = false,
     /// Gather operand B by using an index array
@@ -152,8 +150,6 @@ template <
     int Stages,
     /// Operation perfomed by GEMM
     typename Operator,
-    /// Use zfill or predicate for out-of-bound cp.async
-    SharedMemoryClearOption SharedMemoryClear,
     /// Gather operand A by using an index array
     bool GatherA,
     /// Gather operand B by using an index array
@@ -168,7 +164,7 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
                   LayoutQScale, QuantBlocking,
                   ElementAccumulator, LayoutC,
                   arch::OpClassTensorOp, ArchTag, ThreadblockShape, WarpShape,
-                  InstructionShape, Stages, Operator, false, SharedMemoryClear,
+                  InstructionShape, Stages, Operator, false,
                   GatherA, GatherB, PermuteALayout, PermuteBLayout> {
 
   static_assert(platform::is_same<LayoutC, layout::RowMajor>::value
@@ -233,7 +229,7 @@ struct DefaultQuantBMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
       cutlass::arch::CacheOperation::Global, IteratorQOffset,
       typename MmaCore::SmemIteratorQOffset, cutlass::arch::CacheOperation::Global,
       ElementAccumulator, LayoutC,
-      typename MmaCore::MmaPolicy, Stages, SharedMemoryClear>;
+      typename MmaCore::MmaPolicy, Stages>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

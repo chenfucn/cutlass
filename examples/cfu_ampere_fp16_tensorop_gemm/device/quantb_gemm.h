@@ -207,7 +207,6 @@ class QuantBGemm {
     kStages,
     kSplitKSerial,
     Operator,
-    SharedMemoryClearOption::kNone,
     GatherA,
     GatherB,
     ScatterD,

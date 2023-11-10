@@ -126,8 +126,6 @@ template <
     bool SplitKSerial,
     /// Operation performed by GEMM
     typename Operator,
-    /// Use zfill or predicate for out-of-bound cp.async
-    SharedMemoryClearOption SharedMemoryClear = SharedMemoryClearOption::kNone,
     /// Gather operand A by using an index array
     bool GatherA = false,
     /// Gather operand B by using an index array
@@ -195,8 +193,6 @@ template <
     bool SplitKSerial,
     /// Operation performed by GEMM
     typename Operator,
-    /// Use zfill or predicate for out-of-bound cp.async
-    SharedMemoryClearOption SharedMemoryClear,
     /// Gather operand A by using an index array
     bool GatherA,
     /// Gather operand B by using an index array
@@ -215,7 +211,7 @@ struct DefaultQuantBGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAli
                          ElementC, LayoutC, ElementAccumulator,
                          arch::OpClassTensorOp, arch::Sm80, ThreadblockShape, WarpShape,
                          InstructionShape, EpilogueOutputOp, ThreadblockSwizzle, Stages,
-                         SplitKSerial, Operator, SharedMemoryClear, GatherA, GatherB, ScatterD,
+                         SplitKSerial, Operator, GatherA, GatherB, ScatterD,
                          PermuteDLayout, PermuteALayout, PermuteBLayout> {
 
   static_assert((platform::is_same<LayoutC, layout::RowMajor>::value
@@ -228,7 +224,7 @@ struct DefaultQuantBGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAli
       ElementQScale, ElementQOffset, LayoutQScale, QuantBlocking,
       ElementAccumulator, LayoutC, arch::OpClassTensorOp, arch::Sm80,
       ThreadblockShape, WarpShape, InstructionShape, Stages,
-      Operator, false, SharedMemoryClear, GatherA, GatherB,
+      Operator, false, GatherA, GatherB,
       PermuteALayout, PermuteBLayout>::ThreadblockMma;
 
   static const int kPartitionsK = ThreadblockShape::kK / WarpShape::kK;

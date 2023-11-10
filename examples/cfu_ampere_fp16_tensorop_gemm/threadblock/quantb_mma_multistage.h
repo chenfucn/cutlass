@@ -389,8 +389,6 @@ template <
     typename Policy_,
     /// Number of stages,
     int Stages,
-    /// Use zfill or predicate for out-of-bound cp.async
-    SharedMemoryClearOption SharedMemoryClear = SharedMemoryClearOption::kNone,
     /// Used for partial specialization
     typename Enable = bool>
 class QuantBMmaMultistage : 
@@ -640,20 +638,16 @@ public:
     // Advance global iterators
     iterator_A.add_tile_offset({0, 1});
     iterator_B.add_tile_offset({1, 0});
+    iterator_QScale.add_tile_offset({1, 0});
 
     // Advance shared iterators
     smem_iterator_A_.add_tile_offset({0, 1});
     smem_iterator_B_.add_tile_offset({1, 0});
+    smem_iterator_QScale_.add_tile_offset({1, 0});
 
-    if (should_load_qscale_){
-      iterator_QScale.add_tile_offset({1, 0});
-      smem_iterator_QScale_.add_tile_offset({1, 0});
-    }
     if constexpr (kHasQOffset){
-      if (should_load_qoffset_){
-        iterator_QOffset.add_tile_offset({1, 0});
-        smem_iterator_QOffset_.add_tile_offset({1, 0});
-      }
+      iterator_QOffset.add_tile_offset({1, 0});
+      smem_iterator_QOffset_.add_tile_offset({1, 0});
     }
 
     // Increment shared memory write stage index
@@ -663,22 +657,62 @@ public:
       // Wrap back around to the 'start' of the circular buffer in shared memory
       smem_iterator_A_.add_tile_offset({0, -Base::kStages});
       smem_iterator_B_.add_tile_offset({-Base::kStages, 0});
-      if (should_load_qscale_){
-        smem_iterator_QScale_.add_tile_offset({-Base::kStages, 0});
-      }
+      smem_iterator_QScale_.add_tile_offset({-Base::kStages, 0});
       if constexpr (kHasQOffset){
-        if (should_load_qoffset_){
-          smem_iterator_QOffset_.add_tile_offset({-Base::kStages, 0});
-        }
+        smem_iterator_QOffset_.add_tile_offset({-Base::kStages, 0});
       }
       smem_write_stage_idx_ = 0;
     }
   }
 
   CUTLASS_DEVICE
+  void copy_qscale_tiles(IteratorQScale &iterator_QScale){
+    // Quant scale matrix is 1/block_size of the B matrix, for a 64x64 warp tile,
+    // it's only 64x64/block_size elements. For blocking size 16 ~ 64, it only
+    // takes 4 ~ 16 cp.async instructions to load. One warp has 32 threads, so
+    // it should be loaded in less than one cp.async instruction per thread.
+    // Even less for quant offset matrix.
+    static_assert(Detail::AsyncCopyIterationsPerStageQScale == 1,
+                  "Quant scale should be loaded in one shot!");
+    static_assert(IteratorQScale::kAccessesPerVector == 1,
+                  "Quant scale should 1 access per vector!");
+
+    // Async Copy for quantization scale
+    typename IteratorQScale::AccessType *dst_ptr =
+        reinterpret_cast<typename IteratorQScale::AccessType *>(
+            this->smem_iterator_QScale_.get());
+
+    constexpr int kSrcBytes =
+        sizeof_bits<typename IteratorQScale::Element>::value *
+            IteratorQScale::ThreadMap::kElementsPerAccess / 8;
+
+    cutlass::arch::cp_async<kSrcBytes, kCacheOpQScale>(
+        dst_ptr, iterator_QScale.get(), iterator_QScale.valid());
+  }
+
+  CUTLASS_DEVICE
+  void copy_qoffset_tiles(IteratorQOffset & iterator_QOffset) {
+    static_assert(Detail::AsyncCopyIterationsPerStageQOffset == 1,
+                  "Quant offset should be loaded in one shot!");
+    static_assert(IteratorQOffset::kAccessesPerVector == 1,
+                  "Quant offset should 1 access per vector!");
+
+    if constexpr(kHasQOffset){
+      // Async Copy for quantization offset
+      typename IteratorQOffset::AccessType *dst_ptr =
+          reinterpret_cast<typename IteratorQOffset::AccessType *>(
+              this->smem_iterator_QOffset_.get());
+
+      constexpr int kSrcBytes = sizeof_bits<typename IteratorQOffset::Element>::value *
+                                IteratorQOffset::ThreadMap::kElementsPerAccess / 8;
+
+      cutlass::arch::cp_async<kSrcBytes, kCacheOpQOffset>(
+            dst_ptr, iterator_QOffset.get(), iterator_QOffset.valid());
+    }
+  }
+
+  CUTLASS_DEVICE
   void copy_tiles_and_advance(IteratorA &iterator_A, IteratorB &iterator_B,
-                              IteratorQScale &iterator_QScale,
-                              IteratorQOffset &iterator_QOffset,
                               int group_start = 0) {
     auto group_start_A = group_start * Detail::kAccessesPerGroupA;
     iterator_A.set_iteration_index(group_start_A *
@@ -701,13 +735,8 @@ public:
         for (int v = 0; v < IteratorA::kAccessesPerVector; ++v) {
           auto gmem_ptr = iterator_A.get();
 
-          if (SharedMemoryClear == SharedMemoryClearOption::kZfill) {
-            cutlass::arch::cp_async_zfill<kSrcBytes, kCacheOpA>(
-                dst_ptr + v, gmem_ptr, iterator_A.valid());
-          } else {
-            cutlass::arch::cp_async<kSrcBytes, kCacheOpA>(
-                dst_ptr + v, gmem_ptr, iterator_A.valid());
-          }
+          cutlass::arch::cp_async<kSrcBytes, kCacheOpA>(
+              dst_ptr + v, gmem_ptr, iterator_A.valid());
 
           ++iterator_A;
         }
@@ -737,93 +766,12 @@ public:
         for (int v = 0; v < IteratorB::kAccessesPerVector; ++v) {
           auto gmem_ptr = iterator_B.get();
 
-          if (SharedMemoryClear == SharedMemoryClearOption::kZfill) {
-            cutlass::arch::cp_async_zfill<kSrcBytes, kCacheOpB>(
-                dst_ptr + v, gmem_ptr, iterator_B.valid());
-          } else {
-            cutlass::arch::cp_async<kSrcBytes, kCacheOpB>(
-                dst_ptr + v, gmem_ptr, iterator_B.valid());
-          }
+          cutlass::arch::cp_async<kSrcBytes, kCacheOpB>(
+              dst_ptr + v, gmem_ptr, iterator_B.valid());
 
           ++iterator_B;
         }
         ++this->smem_iterator_B_;
-      }
-    }
-
-    if (should_load_qscale_) {
-      auto group_start_QScale = group_start * Detail::kAccessesPerGroupQScale;
-      iterator_QScale.set_iteration_index(group_start_QScale *
-                                    IteratorQScale::kAccessesPerVector);
-      this->smem_iterator_QScale_.set_iteration_index(group_start_QScale);
-
-      // Async Copy for quantization scale
-      CUTLASS_PRAGMA_UNROLL
-      for (int j = 0; j < Detail::kAccessesPerGroupQScale; ++j) {
-        if (group_start_QScale + j < Detail::AsyncCopyIterationsPerStageQScale) {
-          typename IteratorQScale::AccessType *dst_ptr =
-              reinterpret_cast<typename IteratorQScale::AccessType *>(
-                  this->smem_iterator_QScale_.get());
-
-          int const kSrcBytes = sizeof_bits<typename IteratorQScale::Element>::value *
-                                IteratorQScale::ThreadMap::kElementsPerAccess /
-                                IteratorQScale::kAccessesPerVector / 8;
-
-          CUTLASS_PRAGMA_UNROLL
-          for (int v = 0; v < IteratorQScale::kAccessesPerVector; ++v) {
-            auto gmem_ptr = iterator_QScale.get();
-
-            if (SharedMemoryClear == SharedMemoryClearOption::kZfill) {
-              cutlass::arch::cp_async_zfill<kSrcBytes, kCacheOpQScale>(
-                  dst_ptr + v, gmem_ptr, iterator_QScale.valid());
-            } else {
-              cutlass::arch::cp_async<kSrcBytes, kCacheOpQScale>(
-                  dst_ptr + v, gmem_ptr, iterator_QScale.valid());
-            }
-
-            ++iterator_QScale;
-          }
-          ++this->smem_iterator_QScale_;
-        }
-      }
-    }
-
-    if constexpr(kHasQOffset){
-      if (should_load_qoffset_){
-        auto group_start_QOffset = group_start * Detail::kAccessesPerGroupQOffset;
-        iterator_QOffset.set_iteration_index(group_start_QOffset *
-                                      IteratorQOffset::kAccessesPerVector);
-        this->smem_iterator_QOffset_.set_iteration_index(group_start_QOffset);
-
-        // Async Copy for quantization offset
-        CUTLASS_PRAGMA_UNROLL
-        for (int j = 0; j < Detail::kAccessesPerGroupQOffset; ++j) {
-          if (group_start_QOffset + j < Detail::AsyncCopyIterationsPerStageQOffset) {
-            typename IteratorQOffset::AccessType *dst_ptr =
-                reinterpret_cast<typename IteratorQOffset::AccessType *>(
-                    this->smem_iterator_QOffset_.get());
-
-            int const kSrcBytes = sizeof_bits<typename IteratorQOffset::Element>::value *
-                                  IteratorQOffset::ThreadMap::kElementsPerAccess /
-                                  IteratorQOffset::kAccessesPerVector / 8;
-
-            CUTLASS_PRAGMA_UNROLL
-            for (int v = 0; v < IteratorQOffset::kAccessesPerVector; ++v) {
-              auto gmem_ptr = iterator_QOffset.get();
-
-              if (SharedMemoryClear == SharedMemoryClearOption::kZfill) {
-                cutlass::arch::cp_async_zfill<kSrcBytes, kCacheOpQOffset>(
-                    dst_ptr + v, gmem_ptr, iterator_QOffset.valid());
-              } else {
-                cutlass::arch::cp_async<kSrcBytes, kCacheOpQOffset>(
-                    dst_ptr + v, gmem_ptr, iterator_QOffset.valid());
-              }
-
-              ++iterator_QOffset;
-            }
-            ++this->smem_iterator_QOffset_;
-          }
-        }
       }
     }
   }
@@ -845,6 +793,7 @@ public:
       // Disable global fetching if done with global fetch iterations
       iterator_A.clear_mask(gemm_k_iterations == 0);
       iterator_B.clear_mask(gemm_k_iterations == 0);
+      iterator_QScale.clear_mask(gemm_k_iterations == 0 || !should_load_qscale_);
 
       iterator_A.set_iteration_index(0);
       this->smem_iterator_A_.set_iteration_index(0);
@@ -900,64 +849,39 @@ public:
         ++this->smem_iterator_B_;
       }
 
-      if (should_load_qscale_){
-        iterator_QScale.clear_mask(gemm_k_iterations == 0);
-        iterator_QScale.set_iteration_index(0);
-        this->smem_iterator_QScale_.set_iteration_index(0);
+      // Async Copy for quantization scale
+      static_assert(Detail::AsyncCopyIterationsPerStageQScale == 1, "Quant scale should be loaded in one shot!");
+      static_assert(IteratorQScale::kAccessesPerVector == 1, "Quant scale should 1 access per vector!");
 
-        // Async Copy for quantization scale
-        CUTLASS_PRAGMA_UNROLL
-        for (int j = 0; j < Detail::AsyncCopyIterationsPerStageQScale; ++j) {
-          typename IteratorQScale::AccessType *dst_ptr =
-              reinterpret_cast<typename IteratorQScale::AccessType *>(
-                  this->smem_iterator_QScale_.get());
+      typename IteratorQScale::AccessType *dst_ptr =
+          reinterpret_cast<typename IteratorQScale::AccessType *>(
+              this->smem_iterator_QScale_.get());
 
-          CUTLASS_PRAGMA_UNROLL
-          for (int v = 0; v < IteratorQScale::kAccessesPerVector; ++v) {
-            int const kSrcBytes =
-                sizeof_bits<typename IteratorQScale::Element>::value *
-                IteratorQScale::ThreadMap::kElementsPerAccess /
-                IteratorQScale::kAccessesPerVector / 8;
+      constexpr int kSrcBytes =
+          sizeof_bits<typename IteratorQScale::Element>::value *
+          IteratorQScale::ThreadMap::kElementsPerAccess / 8;
 
-            cutlass::arch::cp_async_zfill<kSrcBytes, kCacheOpQScale>(
-                dst_ptr + v, iterator_QScale.get(), iterator_QScale.valid());
+      auto gmem_ptr = iterator_QScale.get();
 
-            ++iterator_QScale;
-          }
-
-          ++this->smem_iterator_QScale_;
-        }
-      }
+      cutlass::arch::cp_async<kSrcBytes, kCacheOpQScale>(
+          dst_ptr, gmem_ptr, iterator_QScale.valid());
 
       if constexpr (kHasQOffset){
-        if (should_load_qoffset_){
-          iterator_QOffset.clear_mask(gemm_k_iterations == 0);
-          iterator_QOffset.set_iteration_index(0);
-          this->smem_iterator_QOffset_.set_iteration_index(0);
+        iterator_QOffset.clear_mask(gemm_k_iterations == 0 || !should_load_qoffset_);
 
-          // Async Copy for quantization offset
-          CUTLASS_PRAGMA_UNROLL
-          for (int j = 0; j < Detail::AsyncCopyIterationsPerStageQOffset; ++j) {
-            typename IteratorQOffset::AccessType *dst_ptr =
-                reinterpret_cast<typename IteratorQOffset::AccessType *>(
-                    this->smem_iterator_QOffset_.get());
+        // Async Copy for quantization offset
+        static_assert(Detail::AsyncCopyIterationsPerStageQOffset == 1, "Quant offset should be loaded in one shot!");
+        static_assert(IteratorQOffset::kAccessesPerVector == 1, "Quant offset should 1 access per vector!");
+        typename IteratorQOffset::AccessType *dst_ptr =
+            reinterpret_cast<typename IteratorQOffset::AccessType *>(
+                this->smem_iterator_QOffset_.get());
 
-            CUTLASS_PRAGMA_UNROLL
-            for (int v = 0; v < IteratorQOffset::kAccessesPerVector; ++v) {
-              int const kSrcBytes =
-                  sizeof_bits<typename IteratorQOffset::Element>::value *
-                  IteratorQOffset::ThreadMap::kElementsPerAccess /
-                  IteratorQOffset::kAccessesPerVector / 8;
+        constexpr int kSrcBytes =
+            sizeof_bits<typename IteratorQOffset::Element>::value *
+                IteratorQOffset::ThreadMap::kElementsPerAccess / 8;
 
-              cutlass::arch::cp_async_zfill<kSrcBytes, kCacheOpQOffset>(
-                  dst_ptr + v, iterator_QOffset.get(), iterator_QOffset.valid());
-
-              ++iterator_QOffset;
-            }
-
-            ++this->smem_iterator_QOffset_;
-          }
-        }
+        cutlass::arch::cp_async<kSrcBytes, kCacheOpQOffset>(
+            dst_ptr, iterator_QOffset.get(), iterator_QOffset.valid());
       }
 
       // Move to the next write stage
@@ -965,51 +889,6 @@ public:
 
       // Defines the boundary of a stage of cp.async.
       cutlass::arch::cp_async_fence();
-    }
-
-    // Optionally clear the remaining stages of SMEM. This is a functional requirement for
-    // some kernels so that all accumulator elements outside the GEMM footprint are zero.
-    if (SharedMemoryClear == SharedMemoryClearOption::kClearLastStage) {
-
-      /// Iterator to write threadblock-scoped tile of A operand to shared memory
-      SmemIteratorA last_smem_iterator_A(this->smem_iterator_A_);
-      typename IteratorA::AccessType zero_A;
-
-      zero_A.clear();
-      last_smem_iterator_A.set_iteration_index(0);
-
-      // Async Copy for operand A
-      CUTLASS_PRAGMA_UNROLL
-      for (int j = 0; j < Detail::AsyncCopyIterationsPerStageA; ++j) {
-
-        typename IteratorA::AccessType *dst_ptr =
-            reinterpret_cast<typename IteratorA::AccessType *>(
-                last_smem_iterator_A.get());
-
-        *dst_ptr = zero_A;
-
-        ++last_smem_iterator_A;
-      }
-
-      /// Iterator to write threadblock-scoped tile of B operand to shared memory
-      SmemIteratorB last_smem_iterator_B(this->smem_iterator_B_);
-      typename IteratorB::AccessType zero_B;
-
-      zero_B.clear();
-      last_smem_iterator_B.set_iteration_index(0);
-
-      // Async Copy for operand B
-      CUTLASS_PRAGMA_UNROLL
-      for (int j = 0; j < Detail::AsyncCopyIterationsPerStageB; ++j) {
-
-        typename IteratorB::AccessType *dst_ptr =
-            reinterpret_cast<typename IteratorB::AccessType *>(
-                last_smem_iterator_B.get());
-
-        *dst_ptr = zero_B;
-
-        ++last_smem_iterator_B;
-      }
     }
   }
 
@@ -1115,12 +994,16 @@ public:
       copy_tiles_and_advance(
           iterator_A,
           iterator_B,
-          iterator_QScale,
-          iterator_QOffset,
           (warp_mma_k + 1) % Base::kWarpGemmIterations);
+      if (warp_mma_k == 0) {
+        copy_qscale_tiles(iterator_QScale);
+      }
+      if (warp_mma_k == 1) {
+        copy_qoffset_tiles(iterator_QOffset);
+      }
 
       // The second-to-last warp-tile also moves to the next global fetch stage
-      if (warp_mma_k + 2 == Base::kWarpGemmIterations) {
+      if (warp_mma_k == Base::kWarpGemmIterations - 2) {
         // Inserts a memory fence between stages of cp.async instructions.
         cutlass::arch::cp_async_fence();
 
@@ -1132,13 +1015,9 @@ public:
         --gemm_k_iterations;
         iterator_A.clear_mask(gemm_k_iterations == 0);
         iterator_B.clear_mask(gemm_k_iterations == 0);
-        if (should_load_qscale_){
-          iterator_QScale.clear_mask(gemm_k_iterations == 0);
-        }
+        iterator_QScale.clear_mask(gemm_k_iterations == 0 || !should_load_qscale_);
         if constexpr(kHasQOffset){
-          if (should_load_qoffset_){
-            iterator_QOffset.clear_mask(gemm_k_iterations == 0);
-          }
+          iterator_QOffset.clear_mask(gemm_k_iterations == 0 || !should_load_qoffset_);
         }
 
         // Wait until we have at least one completed global fetch stage
@@ -1165,13 +1044,9 @@ public:
     // Disable global fetching if done with global fetch iterations
     iterator_A.clear_mask(gemm_k_iterations == 0);
     iterator_B.clear_mask(gemm_k_iterations == 0);
-    if (should_load_qscale_){
-      iterator_QScale.clear_mask(gemm_k_iterations == 0);
-    }
+    iterator_QScale.clear_mask(gemm_k_iterations == 0 || !should_load_qscale_);
     if constexpr(kHasQOffset){
-      if (should_load_qoffset_){
-        iterator_QOffset.clear_mask(gemm_k_iterations == 0);
-      }
+      iterator_QOffset.clear_mask(gemm_k_iterations == 0 || !should_load_qoffset_);
     }
 
     // Load first warp-tile's B fragment from shared memory
@@ -1189,12 +1064,7 @@ public:
     this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[0]);
     ++this->warp_tile_iterator_A_;
 
-    copy_tiles_and_advance(
-        iterator_A,
-        iterator_B,
-        iterator_QScale,
-        iterator_QOffset,
-        0);
+    copy_tiles_and_advance(iterator_A, iterator_B, 0);
 
     if constexpr(debug_layout){
       if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
