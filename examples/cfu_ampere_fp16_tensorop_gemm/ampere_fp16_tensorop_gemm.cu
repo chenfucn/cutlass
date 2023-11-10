@@ -700,7 +700,7 @@ struct Options {
     problem_size({2048, 28672, 8192}),
     batch_count(1),
     reference_check(true),
-    iterations(500),
+    iterations(1000),
     alpha(1),
     beta() { }
 

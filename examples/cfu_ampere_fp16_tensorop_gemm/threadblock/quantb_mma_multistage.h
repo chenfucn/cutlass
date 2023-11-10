@@ -946,6 +946,12 @@ public:
       this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2]);
       ++this->warp_tile_iterator_A_;
 
+      // All warp-tiles issue their share of global->shared fragment copies
+      copy_tiles_and_advance(
+          iterator_A,
+          iterator_B,
+          (warp_mma_k + 1) % Base::kWarpGemmIterations);
+
       if constexpr(debug_layout){
         if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
           printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, warp_mma_k % Base::kWarpGemmIterations);
@@ -990,11 +996,6 @@ public:
         );
       }
 
-      // All warp-tiles issue their share of global->shared fragment copies
-      copy_tiles_and_advance(
-          iterator_A,
-          iterator_B,
-          (warp_mma_k + 1) % Base::kWarpGemmIterations);
       if (warp_mma_k == 0) {
         copy_qscale_tiles(iterator_QScale);
       }
