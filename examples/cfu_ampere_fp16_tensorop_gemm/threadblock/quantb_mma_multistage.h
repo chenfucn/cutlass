@@ -914,7 +914,6 @@ public:
     }
   }
 
-
   /// Perform a threadblock mainloop iteration of matrix multiply-accumulate
   CUTLASS_DEVICE
   void mac_loop_iter(
@@ -1028,6 +1027,114 @@ public:
     }
   }
 
+  /// Specialized mainloop iteration of matrix multiply-accumulate, for small M
+  CUTLASS_DEVICE
+  void mac_loop_iter_small_m(
+    PipeState &pipe_state,          ///< [in|out] loop-carried pipeline state
+    FragmentC &accum,               ///< [in|out] destination accumulator tile
+    IteratorA &iterator_A,          ///< [in|out] iterator over A operand in global memory
+    IteratorB &iterator_B,          ///< [in|out] iterator over B operand in global memory
+    IteratorQScale &iterator_QScale, ///< [in|out] iterator over quant scales in global memory
+    IteratorQOffset &iterator_QOffset, ///< [in|out] iterator over quant offsets in global memory
+    int &gemm_k_iterations)         ///< [in|out] number of threadblock mainloop iterations remaining
+  {
+    // Unroll the warp-level MMA tiles of a threadblock's mainloop iteration
+    CUTLASS_PRAGMA_UNROLL
+    for (int warp_mma_k = 0; warp_mma_k < Base::kWarpGemmIterations; ++warp_mma_k) {
+      // In the case of small M, memory latency dominates. We try to move uses far
+      // from their definitions to hide latency.
+      if constexpr(debug_layout){
+        if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
+          printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, warp_mma_k % Base::kWarpGemmIterations);
+        }
+        LayoutDebugType::print_as_int4(pipe_state.warp_loaded_frag_B_, 'W', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        if constexpr(kHasQOffset){
+          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        }
+      }
+
+      warp_mma_.transform(
+        pipe_state.warp_transformed_frag_B_[(warp_mma_k) % 2],
+        pipe_state.warp_loaded_frag_B_,
+        pipe_state.warp_loaded_frag_QScale_,
+        pipe_state.warp_loaded_frag_QOffset_);
+
+      if constexpr(debug_layout){
+        LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[(warp_mma_k) % 2], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+      }
+
+      // Loading next warp-level tiles from shared memory.
+      this->warp_tile_iterator_B_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
+      this->warp_tile_iterator_B_.load(pipe_state.warp_loaded_frag_B_);
+      ++this->warp_tile_iterator_B_;
+
+      this->warp_tile_iterator_QScale_.load(
+          pipe_state.warp_loaded_frag_QScale_,
+          pipe_state.warp_loaded_frag_QOffset_);
+      ++this->warp_tile_iterator_QScale_;
+
+      this->warp_tile_iterator_A_.set_kgroup_index((warp_mma_k + 1) % Base::kWarpGemmIterations);
+      this->warp_tile_iterator_A_.load(pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2]);
+      ++this->warp_tile_iterator_A_;
+
+      // All warp-tiles issue their share of global->shared fragment copies
+      copy_tiles_and_advance(
+          iterator_A,
+          iterator_B,
+          (warp_mma_k + 1) % Base::kWarpGemmIterations);
+
+      // Execute the current warp-tile of MMA operations
+      if (Detail::kStagedAccumulation) {
+        warp_mma_(
+          pipe_state.tmp_accum_,
+          pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
+          pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
+          pipe_state.tmp_accum_
+        );
+
+        if (warp_mma_k == 0) {
+          plus<FragmentC> plus_accum;
+          accum = plus_accum(accum, pipe_state.tmp_accum_);
+          pipe_state.tmp_accum_.clear();
+        }
+      } else {
+        warp_mma_(
+          accum,
+          pipe_state.warp_loaded_frag_A_[warp_mma_k % 2],
+          pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
+          accum
+        );
+      }
+
+      // The second-to-last warp-tile also moves to the next global fetch stage
+      if (warp_mma_k == Base::kWarpGemmIterations - 2) {
+        // Inserts a memory fence between stages of cp.async instructions.
+        cutlass::arch::cp_async_fence();
+
+        // Move to the next global fetch stage
+        advance_smem_write_stage(iterator_A, iterator_B, iterator_QScale, iterator_QOffset);
+        advance_smem_read_stage();
+
+        // Disable global fetching when done with global fetch iterations
+        --gemm_k_iterations;
+        iterator_A.clear_mask(gemm_k_iterations == 0);
+        iterator_B.clear_mask(gemm_k_iterations == 0);
+        iterator_QScale.clear_mask(gemm_k_iterations == 0 || !should_load_qscale_);
+        if constexpr(kHasQOffset){
+          iterator_QOffset.clear_mask(gemm_k_iterations == 0 || !should_load_qoffset_);
+        }
+
+        copy_qscale_tiles(iterator_QScale);
+        copy_qoffset_tiles(iterator_QOffset);
+
+        // Wait until we have at least one completed global fetch stage
+        gmem_wait();
+      }
+
+    }
+  }
+
 
   /// Perform the specified number of threadblock mainloop iterations of matrix
   /// multiply-accumulate.  Assumes prologue has been initiated.
@@ -1067,25 +1174,32 @@ public:
 
     copy_tiles_and_advance(iterator_A, iterator_B, 0);
 
-    if constexpr(debug_layout){
-      if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
-        printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, 0);
+    if constexpr(Shape::kM > 32){
+      // the case of bigger m
+      if constexpr(debug_layout){
+        if (LayoutDebugType::debug_fragment && layout_debug_.block_id_ == 1 && layout_debug_.warp_id_ == 0 && layout_debug_.lane_id_ == 0){
+          printf("LINE %d, warp_tile_B kgroup %d\n", __LINE__, 0);
+        }
+        LayoutDebugType::print_as_int4(pipe_state.warp_loaded_frag_B_, 'W', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        if constexpr(kHasQOffset){
+          LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+        }
       }
-      LayoutDebugType::print_as_int4(pipe_state.warp_loaded_frag_B_, 'W', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-      LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QScale_), 'Q', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
-      if constexpr(kHasQOffset){
-        LayoutDebugType::print_fragment(Operator::IteratorQScale::debug_expand(pipe_state.warp_loaded_frag_QOffset_), 'O', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+
+      warp_mma_.transform(
+        pipe_state.warp_transformed_frag_B_[0],
+        pipe_state.warp_loaded_frag_B_,
+        pipe_state.warp_loaded_frag_QScale_,
+        pipe_state.warp_loaded_frag_QOffset_);
+
+      if constexpr(debug_layout){
+        LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[0], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
       }
-    }
-
-    warp_mma_.transform(
-      pipe_state.warp_transformed_frag_B_[0],
-      pipe_state.warp_loaded_frag_B_,
-      pipe_state.warp_loaded_frag_QScale_,
-      pipe_state.warp_loaded_frag_QOffset_);
-
-    if constexpr(debug_layout){
-      LayoutDebugType::print_fragment(pipe_state.warp_transformed_frag_B_[0], 'B', layout_debug_.block_id_, layout_debug_.warp_id_, layout_debug_.lane_id_);
+    } else {
+      // the case of small m
+      copy_qscale_tiles(iterator_QScale);
+      copy_qoffset_tiles(iterator_QOffset);
     }
 
     if (Detail::kStagedAccumulation) {
@@ -1095,14 +1209,25 @@ public:
     // Mainloop
     CUTLASS_GEMM_LOOP
     for (; gemm_k_iterations > (-Base::kStages + 1);) {
-      mac_loop_iter(
-        pipe_state,
-        accum,
-        iterator_A,
-        iterator_B,
-        iterator_QScale,
-        iterator_QOffset,
-        gemm_k_iterations);
+      if constexpr(Shape::kM > 32){
+        mac_loop_iter(
+          pipe_state,
+          accum,
+          iterator_A,
+          iterator_B,
+          iterator_QScale,
+          iterator_QOffset,
+          gemm_k_iterations);
+      } else {
+        mac_loop_iter_small_m(
+          pipe_state,
+          accum,
+          iterator_A,
+          iterator_B,
+          iterator_QScale,
+          iterator_QOffset,
+          gemm_k_iterations);
+      }
     }
 
     if (Detail::kStagedAccumulation) {
