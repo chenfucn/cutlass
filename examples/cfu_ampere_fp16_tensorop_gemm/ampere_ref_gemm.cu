@@ -176,10 +176,10 @@ using SmArch = cutlass::arch::Sm80;
 
 using ShapeMMAThreadBlock =
     cutlass::gemm::GemmShape<128, 256, 64>;
-//    cutlass::gemm::GemmShape<16, 64, 64>;
+    // cutlass::gemm::GemmShape<16, 64, 64>;
 using ShapeMMAWarp = 
-      cutlass::gemm::GemmShape<64, 64, 64>;
-//    cutlass::gemm::GemmShape<16, 32, 64>;
+    cutlass::gemm::GemmShape<64, 64, 64>;
+    // cutlass::gemm::GemmShape<16, 32, 64>;
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;
 
 // This code section describes how threadblocks are scheduled on GPU
